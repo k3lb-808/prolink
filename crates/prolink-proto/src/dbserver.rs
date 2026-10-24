@@ -1611,13 +1611,17 @@ impl<'a> Reader<'a> {
         let at = self.pos;
         self.expect_tag(FieldTag::BLOB, "argument tags")?;
         let length = self.u32()?;
-        if length != u32::try_from(ARG_TAG_BLOB_LEN).unwrap_or(u32::MAX) {
+        // XDJ-AZ (OneLibrary era) sends the blob only as long as needed,
+        // without the zero padding to twelve a CDJ-2000NXS always writes.
+        if length > u32::try_from(ARG_TAG_BLOB_LEN).unwrap_or(u32::MAX) {
             return Err(Error::malformed(
                 at,
-                format!("argument-tag blob is {length} bytes, not {ARG_TAG_BLOB_LEN}"),
+                format!("argument-tag blob is {length} bytes, more than {ARG_TAG_BLOB_LEN}"),
             ));
         }
-        self.take(ARG_TAG_BLOB_LEN)
+        // Short announced tags: the decoder relies on tags.get(index) yielding
+        // None beyond the announcement, which the caller maps to zero.
+        self.take(usize::try_from(length).unwrap_or(usize::MAX))
     }
 
     /// One argument, checked against the type the header claimed for it.

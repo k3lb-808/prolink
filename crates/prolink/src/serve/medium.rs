@@ -93,6 +93,8 @@ pub struct Analysis {
     pub dat: Option<AnlzFile>,
     /// `ANLZ####.EXT`: the scrolling waveform and the newer tags.
     pub ext: Option<AnlzFile>,
+    /// `ANLZ####.2EX`: the CDJ-3000-era three-band tags.
+    pub two_ex: Option<AnlzFile>,
 }
 
 impl Analysis {
@@ -107,6 +109,7 @@ impl Analysis {
             .as_ref()
             .and_then(|file| file.payload(fourcc))
             .or_else(|| self.ext.as_ref().and_then(|file| file.payload(fourcc)))
+            .or_else(|| self.two_ex.as_ref().and_then(|file| file.payload(fourcc)))
             .unwrap_or_default()
     }
 }
@@ -608,6 +611,11 @@ impl Medium {
         Analysis {
             dat: load(&track.analyze_path),
             ext: track.analyze_ext_path().as_deref().and_then(load),
+            two_ex: track
+                .analyze_ext_path()
+                .as_deref()
+                .map(|path| path.replace(".EXT", ".2EX").replace(".ext", ".2ex"))
+                .and_then(|relative| load(&relative)),
         }
     }
 }

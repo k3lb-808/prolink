@@ -674,6 +674,9 @@ impl Session {
             && let Some(reply) = analysis::reply(message, medium, shared.started.elapsed())
         {
             push(out, &reply);
+            for message in analysis::push_bundle(medium, message.number(1).unwrap_or(0), kind) {
+                push(out, &message);
+            }
             return Flow::Continue;
         }
 

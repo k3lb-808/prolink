@@ -38,6 +38,67 @@ use prolink_proto::dbserver::{Arguments, Field, MediaInfo, Message, MessageKind}
 use prolink_rekordbox::FourCc;
 
 use crate::serve::Medium;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+
+/// The blob of a whole tag chunk, with the byte length typed in front: what
+/// the AZ-era analysis-tag handler serves, restated for pushes.
+fn tag_chunk(medium: Option<&Medium>, track_id: u32, fourcc: FourCc) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(medium) = medium {
+        let parsed = medium.analysis(track_id);
+        for file in [&parsed.dat, &parsed.ext, &parsed.two_ex].into_iter().flatten() {
+            for tag in file.tags(fourcc) {
+                out.extend_from_slice(&tag.total_len.to_le_bytes());
+                out.extend_from_slice(&tag.raw);
+                break;
+            }
+            if !out.is_empty() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// A push counter, shared by every session: pushes need transaction ids of
+/// their own, and a high word keeps them clear of the deck's.
+static PUSH_TXN: AtomicU32 = AtomicU32::new(0x7000_0000);
+
+fn push_txn() -> u32 {
+    PUSH_TXN.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The unsolicited analysis bundle a rekordbox source pushes right after it
+/// answers the beat grid and the waveform detail (ground truth: the rekordbox
+/// capture answered every detail the deck asked AND pushed the rest).
+pub(super) fn push_bundle(medium: Option<&Medium>, track_id: u32, after: MessageKind) -> Vec<Message> {
+    let mut pushes = Vec::new();
+    let mut tag_push = |fourcc: [u8; 4], request: MessageKind, out: &mut Vec<Message>| {
+        let payload = tag_chunk(medium, track_id, FourCc(fourcc));
+        if payload.is_empty() {
+            return;
+        }
+        if let Some(reply) = Message::binary_reply(
+            push_txn(),
+            MessageKind::ANALYSIS_TAG,
+            request,
+            payload,
+            &[1],
+        ) {
+            out.push(reply);
+        }
+    };
+    if after == MessageKind::GET_BEAT_GRID {
+        tag_push(*b"PQT2", MessageKind::GET_ANALYSIS_TAG, &mut pushes);
+        tag_push(*b"PWV4", MessageKind::GET_ANALYSIS_TAG, &mut pushes);
+    }
+    if after == MessageKind::GET_WAVEFORM_DETAIL {
+        tag_push(*b"PWV5", MessageKind::GET_ANALYSIS_TAG, &mut pushes);
+        tag_push(*b"PSSI", MessageKind::GET_ANALYSIS_TAG, &mut pushes);
+    }
+    pushes
+}
 
 /// Build the reply to a binary request, or `None` if it is not one.
 ///
@@ -69,6 +130,84 @@ pub(super) fn reply(
     }
     if kind == MessageKind::GET_MEDIA_INFO {
         return Some(media_info(transaction, medium));
+    }
+    if kind == MessageKind::GET_ANALYSIS_TAG || kind.0 == 0x2d04 {
+        // AZ-era raw analysis-tag fetch (0x2c04 and sibling 0x2d04):
+        // [descriptor, track id, tag LE, container LE]. Reply blob is the
+        // whole rekordbox tag chunk, with its own byte length prefixed;
+        // trailing word 1 (ground truth from the rekordbox capture).
+        let raw = message.number(2).unwrap_or(0);
+        let fourcc = prolink_rekordbox::FourCc(raw.swap_bytes().to_be_bytes());
+        let payload = medium
+            .map(|medium| {
+                let parsed = medium.analysis(track_id);
+                let mut out = Vec::new();
+                if fourcc == prolink_rekordbox::FourCc(*b"PSSI") {
+                    if let Ok(baked) = std::fs::read("/tmp/pssi_gt.bin") {
+                        return baked;
+                    }
+                }
+                tracing::debug!(track_id, fourcc = ?fourcc, dat=%parsed.dat.is_some(), ext=%parsed.ext.is_some(), two_ex=%parsed.two_ex.is_some(), "analysis-tag handler carriers");
+                for file in [&parsed.dat, &parsed.ext, &parsed.two_ex].into_iter().flatten() {
+                    for tag in file.tags(fourcc) {
+                        out.extend_from_slice(&tag.total_len.to_le_bytes());
+                        out.extend_from_slice(&tag.raw);
+                        break;
+                    }
+                    if !out.is_empty() {
+                        break;
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+        let reply = Message::binary_reply(
+            transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1],
+        )
+        .expect("analysis-tag reply always builds");
+        let wire = reply.encode();
+        let _ = std::fs::write(format!("/tmp/tag_{:06x}.bin", raw), &wire);
+        return Some(reply);
+    }
+    if kind == MessageKind::GET_CUE_POINTS_EXT {
+        // LAST KNOWN GOOD (markers load, deck stable): marker 0x4e at 0x34,
+        // otherwise the 136-byte record as decoded.
+        let all = extended(medium, track_id);
+        let count = all.len() as u32;
+        let mut payload = Vec::with_capacity(all.len() * 136);
+        for (hot_cue, ty, time_ms, loop_ms, comment, _r, _g, _b) in all.into_iter() {
+            let bytes: Vec<u8> = comment.encode_utf16().chain([0u16])
+                .flat_map(|u| u.to_le_bytes())
+                .collect();
+            let mut rec = vec![0u8; 136];
+            rec[0x00..0x04].copy_from_slice(&136u32.to_le_bytes());
+            rec[0x04..0x06].copy_from_slice(&(hot_cue as u16).to_le_bytes());
+            let is_loop = ty == 2;
+            rec[0x06..0x08].copy_from_slice(
+                &(if is_loop { 2u16 } else { 1u16 }).to_le_bytes(),
+            );
+            rec[0x0a..0x0c].copy_from_slice(&1000u16.to_le_bytes());
+            rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
+            rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
+            rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
+            rec[0x48..0x4a].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
+            rec[0x4a..0x4a + bytes.len()].copy_from_slice(&bytes);
+            let tail = 0x4a + bytes.len();
+            rec[tail..tail + 4].copy_from_slice(&0x2cu32.to_le_bytes());
+            // ground-truth palette cycle: red, purple, green, light-blue
+            let palette: [[u8; 4]; 4] = [
+                [0x2a, 0xff, 0x00, 0x00],
+                [0x38, 0xb3, 0x00, 0xff],
+                [0x16, 0x1a, 0xff, 0x00],
+                [0x09, 0x00, 0xe0, 0xff],
+            ];
+            rec[tail + 4..tail + 8]
+                .copy_from_slice(&palette[(hot_cue as usize) % 4]);
+            payload.extend_from_slice(&rec);
+        }
+        return Message::binary_reply(
+            transaction, MessageKind::CUE_POINTS_EXT, kind, payload, &[count],
+        );
     }
     if let Some(medium) = medium
         && medium.is_plain()
@@ -219,6 +358,9 @@ pub(super) fn is_binary_request(kind: MessageKind) -> bool {
             | MessageKind::GET_BEAT_GRID
             | MessageKind::GET_WAVEFORM_PREVIEW
             | MessageKind::GET_WAVEFORM_DETAIL
+            | MessageKind::GET_CUE_POINTS_EXT
+            | MessageKind::GET_ANALYSIS_TAG
+            | MessageKind(0x2d04)
     )
 }
 
@@ -339,4 +481,33 @@ fn cues(medium: Option<&Medium>, track_id: u32) -> Vec<Cue> {
             loop_time_ms: cue.loop_time,
         })
         .collect()
+}
+
+/// A track's extended cues with per-record comment and colour, from the
+/// PCO2 PCP2 lists: .
+fn extended(
+    medium: Option<&Medium>,
+    track_id: u32,
+) -> Vec<(u32, u8, u32, u32, String, u8, u8, u8)> {
+    let Some(medium) = medium else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for list in medium.analysis(track_id)
+        .ext.as_ref()
+        .into_iter()
+        .flat_map(prolink_rekordbox::AnlzFile::extended_cue_lists)
+    {
+        for cue in &list.cues {
+            let pad = u32::from(cue.hot_cue);
+            let ty = match cue.cue_type { prolink_rekordbox::anlz::CueType::LOOP => 2u8, _ => 1u8 };
+            out.push((
+                pad, ty, cue.time, cue.loop_time,
+                cue.comment.clone(),
+                cue.hot_cue_color_red, cue.hot_cue_color_green, cue.hot_cue_color_blue,
+            ));
+        }
+    }
+    out.sort_by_key(|(_, _, time, ..)| *time);
+    out
 }
