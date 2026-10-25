@@ -573,7 +573,7 @@ impl VirtualCdj {
         cdj.tasks.push(cdj.spawn_defender(discovery));
         cdj.tasks.push(cdj.spawn_step_aside(discovery));
         if let Some(socket) = cdj.status_socket.clone() {
-            cdj.tasks.push(cdj.spawn_status(discovery)?);
+            cdj.tasks.push(cdj.spawn_status(discovery, Arc::clone(&socket))?);
             cdj.tasks.push(cdj.spawn_query_responder(socket));
             // Beats ride with status, not with the keep-alive: a device that
             // does not publish what it is doing has no business claiming a
@@ -1063,7 +1063,7 @@ impl VirtualCdj {
         0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x09, 0xff, 0x00,
     ];
 
-    fn spawn_status(&self, discovery: &Discovery) -> Result<JoinHandle<()>> {
+    fn spawn_status(&self, discovery: &Discovery, shared: Arc<UdpSocket>) -> Result<JoinHandle<()>> {
         // A real deck sends each status packet from a different, incrementing
         // source port. We do not imitate that; an ephemeral port is enough, and
         // the socket bound to 50002 is kept free to receive queries.
@@ -1105,7 +1105,10 @@ impl VirtualCdj {
                 if config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
                     // The source does not publish player status at all: it
                     // broadcasts the constant source status instead, and the
-                    // deck learns our slots by asking, not by listening.
+                    // deck learns our slots by asking, not by listening. The
+                    // datagram leaves from the port the queries are answered
+                    // on — a datagram from any other source port is not what
+                    // a deck is listening for.
                     let mut packet = Self::SOURCE_STATUS;
                     packet[11..31].copy_from_slice(&config.name.0);
                     packet[33] = number.load(Ordering::Relaxed);
@@ -1113,7 +1116,7 @@ impl VirtualCdj {
                         interface.broadcast(),
                         STATUS_PORT,
                     ));
-                    if let Err(error) = socket.send_to(&packet, to).await {
+                    if let Err(error) = shared.send_to(&packet, to).await {
                         debug!(%error, "source status broadcast failed");
                     }
                     last = Some((now, published));
