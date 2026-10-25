@@ -25,8 +25,8 @@ use prolink::consume::{DbClient, NfsClient};
 use prolink::serve::{Medium, ServedSlot, VirtualPlayer, VirtualPlayerConfig};
 use prolink::virtual_cdj::{Numbering, VirtualCdjConfig};
 use prolink::{
-    BeatInBar, BrowsableDeviceNumber, DeviceName, DeviceNumber, Discovery, Interface, Monitor,
-    PeerSlot, PlayerState, Slot, VirtualCdj, discovery::SCAN_DURATION,
+    BeatInBar, BrowsableDeviceNumber, DeviceKind, DeviceName, DeviceNumber, Discovery, Interface,
+    Monitor, PeerSlot, PlayerState, Slot, VirtualCdj, discovery::SCAN_DURATION,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -214,6 +214,12 @@ enum Command {
         #[arg(long, default_value = DeviceName::CDJ_2000_NEXUS)]
         name: String,
 
+        /// What to claim to be on the link. `cdj` (default) behaves exactly as
+        /// before; `rekordbox` announces kind 0x03, how rekordbox desktop and
+        /// the CDJ-3000 present themselves.
+        #[arg(long, default_value = "cdj", value_parser = device_kind)]
+        kind: DeviceKind,
+
         /// Keep-alive byte 0x35. `0x64` is required to coexist with CDJ-3000s.
         #[arg(long, default_value_t = 0x00, value_parser = maybe_hex)]
         generation: u8,
@@ -268,6 +274,14 @@ fn maybe_hex(text: &str) -> Result<u8, String> {
         None => text.parse(),
     };
     parsed.map_err(|_| format!("{text} is not a byte"))
+}
+
+fn device_kind(text: &str) -> Result<DeviceKind, String> {
+    match text {
+        "cdj" => Ok(DeviceKind::CDJ),
+        "rekordbox" => Ok(DeviceKind::REKORDBOX_OR_CDJ3000),
+        _ => Err(format!("{text} is not a device kind; try cdj or rekordbox")),
+    }
 }
 
 #[tokio::main]
@@ -380,6 +394,7 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
             sd,
             number,
             name,
+            kind,
             generation,
             portmap_port,
         } => {
@@ -390,6 +405,7 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
                 sd.as_deref(),
                 number,
                 &name,
+                kind,
                 generation,
                 portmap_port,
             )
@@ -551,6 +567,7 @@ async fn serve(
     sd: Option<&std::path::Path>,
     number: Option<BrowsableDeviceNumber>,
     name: &str,
+    kind: DeviceKind,
     generation: u8,
     portmap_port: u16,
 ) -> Result<(), BoxedError> {
@@ -581,6 +598,7 @@ async fn serve(
     let config = VirtualPlayerConfig {
         preferred_number: number,
         name: DeviceName::new(name),
+        kind,
         generation,
         portmap_port,
         ..VirtualPlayerConfig::new(interface)
