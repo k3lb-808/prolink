@@ -102,6 +102,15 @@ impl StatusKind {
     pub const WF_SETTINGS_QUERY: Self = Self(0x46);
     /// The answer to a [`Self::WF_SETTINGS_QUERY`].
     pub const WF_SETTINGS_RESPONSE: Self = Self(0x47);
+    /// "Describe yourself as a source" — the deck retries this about five
+    /// times a second until it is answered, and rekordbox answers it once.
+    pub const SOURCE_QUERY: Self = Self(0x10);
+    /// The answer to a [`Self::SOURCE_QUERY`].
+    pub const SOURCE_RESPONSE: Self = Self(0x11);
+    /// A short source question the deck asks at connect time.
+    pub const SOURCE_QUERY_SHORT: Self = Self(0x30);
+    /// The answer to a [`Self::SOURCE_QUERY_SHORT`].
+    pub const SOURCE_RESPONSE_SHORT: Self = Self(0x31);
 
     /// A name for logs, or `None` for a kind we have never observed.
     pub fn name(self) -> Option<&'static str> {
@@ -114,6 +123,10 @@ impl StatusKind {
             Self::SETTINGS_RESPONSE => "settings_response",
             Self::WF_SETTINGS_QUERY => "wf_settings_query",
             Self::WF_SETTINGS_RESPONSE => "wf_settings_response",
+            Self::SOURCE_QUERY => "source_query",
+            Self::SOURCE_RESPONSE => "source_response",
+            Self::SOURCE_QUERY_SHORT => "source_query_short",
+            Self::SOURCE_RESPONSE_SHORT => "source_response_short",
             _ => return None,
         })
     }
@@ -177,6 +190,14 @@ pub enum Packet {
     WaveformSettingsQuery(WaveformSettingsQuery),
     /// The waveform settings of a source, inline.
     WaveformSettingsResponse(WaveformSettingsResponse),
+    /// "Describe yourself as a source."
+    SourceQuery(SourceQuery),
+    /// A source's self-description, name and all.
+    SourceResponse(SourceResponse),
+    /// A short source question.
+    SourceQueryShort(SourceQueryShort),
+    /// The short answer to it.
+    SourceResponseShort(SourceResponseShort),
     /// A well-formed datagram of a kind this crate does not model, including
     /// mixer status.
     Other {
@@ -198,6 +219,10 @@ impl Packet {
             Self::SettingsResponse(_) => StatusKind::SETTINGS_RESPONSE,
             Self::WaveformSettingsQuery(_) => StatusKind::WF_SETTINGS_QUERY,
             Self::WaveformSettingsResponse(_) => StatusKind::WF_SETTINGS_RESPONSE,
+            Self::SourceQuery(_) => StatusKind::SOURCE_QUERY,
+            Self::SourceResponse(_) => StatusKind::SOURCE_RESPONSE,
+            Self::SourceQueryShort(_) => StatusKind::SOURCE_QUERY_SHORT,
+            Self::SourceResponseShort(_) => StatusKind::SOURCE_RESPONSE_SHORT,
             Self::Other { kind, .. } => *kind,
         }
     }
@@ -249,6 +274,17 @@ pub fn decode(data: &[u8]) -> Result<Packet> {
             .map_or_else(|_| other(), Packet::WaveformSettingsQuery),
         StatusKind::WF_SETTINGS_RESPONSE => WaveformSettingsResponse::parse(data)
             .map_or_else(|_| other(), Packet::WaveformSettingsResponse),
+        StatusKind::SOURCE_QUERY => {
+            SourceQuery::parse(data).map_or_else(|_| other(), Packet::SourceQuery)
+        }
+        StatusKind::SOURCE_RESPONSE => {
+            SourceResponse::parse(data).map_or_else(|_| other(), Packet::SourceResponse)
+        }
+        StatusKind::SOURCE_QUERY_SHORT => {
+            SourceQueryShort::parse(data).map_or_else(|_| other(), Packet::SourceQueryShort)
+        }
+        StatusKind::SOURCE_RESPONSE_SHORT => SourceResponseShort::parse(data)
+            .map_or_else(|_| other(), Packet::SourceResponseShort),
         _ => other(),
     })
 }
@@ -1734,6 +1770,179 @@ impl fmt::Debug for WaveformSettingsResponse {
         f.debug_struct("WaveformSettingsResponse")
             .field("sender", &self.sender())
             .field("color", &self.color())
+            .finish()
+    }
+}
+
+// -- source description (0x10 / 0x11, 0x30 / 0x31) --------------------------
+
+/// "Describe yourself as a source" — the deck retries this about five times a
+/// second until it is answered; rekordbox answers it once, at connect time,
+/// and a server that never answers is a source the deck keeps waiting on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceQuery {
+    /// The device asking, from byte `0x21`.
+    pub sender: DeviceNumber,
+}
+
+impl SourceQuery {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x24;
+
+    /// Parse a source query.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::SOURCE_QUERY, Self::LEN)?;
+        let sender = DeviceNumber::new(byte_at(data, OFF_SENDER).unwrap_or(0))
+            .ok_or_else(|| Error::malformed(OFF_SENDER, "source query from device 0"))?;
+        Ok(Self { sender })
+    }
+}
+
+/// A source's self-description: its device number again, then its name as
+/// UTF-16 little-endian.
+///
+/// The ground truth carries the desktop machine's Windows name; we carry the
+/// name we announce with.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourceResponse {
+    raw: Vec<u8>,
+}
+
+impl SourceResponse {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x128;
+
+    const OFF_DEVICE: usize = 0x24;
+    const OFF_FLAGS: usize = 0x25;
+    const OFF_NAME: usize = 0x29;
+    const LEN_NAME: usize = Self::LEN - Self::OFF_NAME;
+
+    /// Parse a source response.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::SOURCE_RESPONSE, Self::LEN)?;
+        Ok(Self { raw: data.to_vec() })
+    }
+
+    header_accessors!();
+
+    /// The name the source carries, decoded lossily.
+    pub fn label(&self) -> String {
+        String::from_utf16_lossy(
+            &self
+                .raw
+                .get(Self::OFF_NAME..Self::LEN)
+                .unwrap_or_default()
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Build the answer naming ourselves `name`.
+    pub fn build(name: DeviceName, sender: DeviceNumber) -> Self {
+        let mut raw = vec![0u8; Self::LEN];
+        write_header(&mut raw, StatusKind::SOURCE_RESPONSE, name, sender.get());
+        if let Some(slot) = raw.get_mut(OFF_SUBTYPE) {
+            *slot = 0x01;
+        }
+        if let Some(slot) = raw.get_mut(Self::OFF_DEVICE) {
+            *slot = sender.get();
+        }
+        if let Some(slot) = raw.get_mut(Self::OFF_FLAGS) {
+            *slot = 0x01;
+        }
+        let label = String::from_utf8_lossy(
+            &name
+                .0
+                .iter()
+                .copied()
+                .take_while(|&byte| byte != 0)
+                .collect::<Vec<_>>(),
+        )
+        .into_owned();
+        let mut encoded = Vec::with_capacity(label.len() * 2);
+        for unit in label.encode_utf16() {
+            encoded.extend_from_slice(&unit.to_le_bytes());
+        }
+        let room = Self::LEN_NAME.min(encoded.len());
+        if let Some(field) = raw.get_mut(Self::OFF_NAME..Self::OFF_NAME + room) {
+            field.copy_from_slice(&encoded[..room]);
+        }
+        Self { raw }
+    }
+}
+
+impl fmt::Debug for SourceResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourceResponse")
+            .field("sender", &self.sender())
+            .field("label", &self.label())
+            .finish()
+    }
+}
+
+/// The short source question, body empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceQueryShort {
+    /// The device asking, from byte `0x21`.
+    pub sender: DeviceNumber,
+}
+
+impl SourceQueryShort {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x24;
+
+    /// Parse one.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::SOURCE_QUERY_SHORT, Self::LEN)?;
+        let sender = DeviceNumber::new(byte_at(data, OFF_SENDER).unwrap_or(0))
+            .ok_or_else(|| Error::malformed(OFF_SENDER, "short source query from device 0"))?;
+        Ok(Self { sender })
+    }
+}
+
+/// The short answer: subtype `0x03` and the eight body bytes the ground truth
+/// carries, otherwise verbatim.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourceResponseShort {
+    raw: Vec<u8>,
+}
+
+impl SourceResponseShort {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x2c;
+
+    /// Parse one.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::SOURCE_RESPONSE_SHORT, Self::LEN)?;
+        Ok(Self { raw: data.to_vec() })
+    }
+
+    header_accessors!();
+
+    /// Build the answer with the ground truth's body.
+    pub fn build(name: DeviceName, sender: DeviceNumber) -> Self {
+        let mut raw = vec![0u8; Self::LEN];
+        write_header(
+            &mut raw,
+            StatusKind::SOURCE_RESPONSE_SHORT,
+            name,
+            sender.get(),
+        );
+        if let Some(slot) = raw.get_mut(OFF_SUBTYPE) {
+            *slot = 0x03;
+        }
+        if let Some(field) = raw.get_mut(0x24..0x2c) {
+            field.copy_from_slice(&[0x06, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        Self { raw }
+    }
+}
+
+impl fmt::Debug for SourceResponseShort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourceResponseShort")
+            .field("sender", &self.sender())
             .finish()
     }
 }

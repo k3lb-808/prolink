@@ -1228,8 +1228,10 @@ impl VirtualCdj {
                 }
 
                 debug!(
+                    %from,
                     kind = datagram.get(10).copied().unwrap_or(0),
                     bytes = len,
+                    head = ?datagram.get(..24.min(len)).map(<[u8]>::to_vec),
                     "50002 datagram heard",
                 );
                 let reply = match status::decode(datagram) {
@@ -1252,6 +1254,16 @@ impl VirtualCdj {
                     Ok(status::Packet::MediaQuery(query)) => {
                         answer_media_query(query, ours, name, media.as_ref())
                             .map(|reply| (reply, query.requester_ip))
+                    }
+                    Ok(status::Packet::SourceQuery(query)) => {
+                        let response = status::SourceResponse::build(name, ours);
+                        info!(sender = %query.sender, "answered a source query");
+                        Some((response.into_bytes(), *from.ip()))
+                    }
+                    Ok(status::Packet::SourceQueryShort(query)) => {
+                        let response = status::SourceResponseShort::build(name, ours);
+                        debug!(sender = %query.sender, "answered a short source query");
+                        Some((response.into_bytes(), *from.ip()))
                     }
                     Ok(status::Packet::WaveformSettingsQuery(query)) => {
                         let response = status::WaveformSettingsResponse::build(
