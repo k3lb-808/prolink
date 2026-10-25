@@ -572,7 +572,15 @@ async fn serve(
     portmap_port: u16,
 ) -> Result<(), BoxedError> {
     let mut media = Vec::new();
-    for (path, slot) in [(usb, ServedSlot::USB), (sd, ServedSlot::SD)] {
+    // A rekordbox-class source serves its collection in the rekordbox slot:
+    // the deck's media query and every descriptor it then sends name slot 4,
+    // not the USB slot a player's stick sits in.
+    let usb_slot = if kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+        ServedSlot::REKORDBOX
+    } else {
+        ServedSlot::USB
+    };
+    for (path, slot) in [(usb, usb_slot), (sd, ServedSlot::SD)] {
         let Some(path) = path else { continue };
         let medium = Medium::open(path, slot)?;
         if let Some(folders) = medium.folders() {

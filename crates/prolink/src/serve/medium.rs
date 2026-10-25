@@ -42,11 +42,16 @@ impl ServedSlot {
     pub const SD: Self = Self(Slot::SD);
     /// The USB slot, exported as `/C/`.
     pub const USB: Self = Self(Slot::USB);
+    /// The rekordbox collection slot, exported as `/C/` as well: the AZ
+    /// ground truth has the desktop application export exactly that path for
+    /// the collection a deck reaches over the network, and the deck's media
+    /// query names this slot of the source.
+    pub const REKORDBOX: Self = Self(Slot::REKORDBOX);
 
     /// Narrow a slot to one that can be served, or `None`.
     pub const fn new(slot: Slot) -> Option<Self> {
         match slot {
-            Slot::SD | Slot::USB => Some(Self(slot)),
+            Slot::SD | Slot::USB | Slot::REKORDBOX => Some(Self(slot)),
             _ => None,
         }
     }

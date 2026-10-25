@@ -607,7 +607,7 @@ impl VirtualCdj {
     /// then never ask (F45). The serve side requires this rather than a plain
     /// device number, so a server that can never be browsed cannot be started.
     pub fn browsable_number(&self) -> Option<BrowsableDeviceNumber> {
-        self.number().browsable()
+        BrowsableDeviceNumber::new(self.number().get())
     }
 
     /// What our peers have loaded from us. Shared, and kept current for as
@@ -1051,6 +1051,18 @@ impl VirtualCdj {
     /// broadcast (F21) — so this sends per peer rather than once. Peers that
     /// have not announced themselves get nothing, which mirrors why we received
     /// nothing until we announced.
+    /// The source status a rekordbox Link-Export source broadcasts on UDP
+    /// 50002 about every 200 ms: 778 identical 56-byte datagrams in the AZ
+    /// ground truth, so constant that only the name and the sender number are
+    /// ours to write. The body is verbatim ground truth; its meaning is
+    /// unmapped.
+    const SOURCE_STATUS: [u8; 56] = [
+        0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x29, 0x72, 0x65, 0x6b, 0x6f,
+        0x72, 0x64, 0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x01, 0x29, 0x00, 0x38, 0x29, 0x00, 0x00, 0xc0, 0x00, 0x10, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x09, 0xff, 0x00,
+    ];
+
     fn spawn_status(&self, discovery: &Discovery) -> Result<JoinHandle<()>> {
         // A real deck sends each status packet from a different, incrementing
         // source port. We do not imitate that; an ephemeral port is enough, and
@@ -1066,6 +1078,7 @@ impl VirtualCdj {
         let master = Arc::clone(&self.tempo_master);
         let yielding = Arc::clone(&self.yielding_to);
         let synced = Arc::clone(&self.synced);
+        let interface = self.interface.clone();
 
         Ok(tokio::spawn(async move {
             // Every 200 ms, and at once when what we publish changes: see
@@ -1087,6 +1100,23 @@ impl VirtualCdj {
                 let published = Published::of(&transport, media.as_ref());
                 let now = Instant::now();
                 if !status_due(last, now, published) {
+                    continue;
+                }
+                if config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+                    // The source does not publish player status at all: it
+                    // broadcasts the constant source status instead, and the
+                    // deck learns our slots by asking, not by listening.
+                    let mut packet = Self::SOURCE_STATUS;
+                    packet[11..31].copy_from_slice(&config.name.0);
+                    packet[33] = number.load(Ordering::Relaxed);
+                    let to = SocketAddr::V4(SocketAddrV4::new(
+                        interface.broadcast(),
+                        STATUS_PORT,
+                    ));
+                    if let Err(error) = socket.send_to(&packet, to).await {
+                        debug!(%error, "source status broadcast failed");
+                    }
+                    last = Some((now, published));
                     continue;
                 }
                 let peers = table.get();
@@ -1197,6 +1227,11 @@ impl VirtualCdj {
                     let _ = tap.send(Arc::new(datagram.to_vec()));
                 }
 
+                debug!(
+                    kind = datagram.get(10).copied().unwrap_or(0),
+                    bytes = len,
+                    "50002 datagram heard",
+                );
                 let reply = match status::decode(datagram) {
                     // Not a query, but the packet that tells us what this deck
                     // has loaded from us — which is what lets a track row be

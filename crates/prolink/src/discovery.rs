@@ -200,6 +200,8 @@ impl Discovery {
                     }
                 };
 
+                debug!(%from, body = ?packet.body, "discovery heard");
+
                 let event = match table.lock() {
                     Ok(mut table) => table.observe(&packet, Instant::now()),
                     Err(poisoned) => poisoned.into_inner().observe(&packet, Instant::now()),
