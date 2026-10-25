@@ -64,6 +64,12 @@ use crate::{Error, MAGIC, Result, Slot};
 /// Measured at 199 ms mean (min 63, max 207) on a real CDJ-2000nexus.
 pub const STATUS_INTERVAL: Duration = Duration::from_millis(200);
 
+/// How often a rekordbox-class source republishes the source status.
+///
+/// The ground-truth capture shows the desktop application broadcasting it
+/// every 100 ms — twice the player cadence above.
+pub const SOURCE_ANNOUNCE_INTERVAL: Duration = Duration::from_millis(100);
+
 // The offsets below, and the four helpers further down marked `pub(crate)`,
 // describe the header **shared with UDP 50001** — see [`crate::beat`], which
 // reads and writes exactly this layout with a different byte at `0x0a`. They
@@ -111,6 +117,10 @@ impl StatusKind {
     pub const SOURCE_QUERY_SHORT: Self = Self(0x30);
     /// The answer to a [`Self::SOURCE_QUERY_SHORT`].
     pub const SOURCE_RESPONSE_SHORT: Self = Self(0x31);
+    /// "The rekordbox source is here" — the datagram a deck lists a source
+    /// by. rekordbox sends it three times right after answering a short
+    /// source query, once per deck boot.
+    pub const SOURCE_ANNOUNCE: Self = Self(0x16);
 
     /// A name for logs, or `None` for a kind we have never observed.
     pub fn name(self) -> Option<&'static str> {
@@ -127,6 +137,7 @@ impl StatusKind {
             Self::SOURCE_RESPONSE => "source_response",
             Self::SOURCE_QUERY_SHORT => "source_query_short",
             Self::SOURCE_RESPONSE_SHORT => "source_response_short",
+            Self::SOURCE_ANNOUNCE => "source_announce",
             _ => return None,
         })
     }
@@ -198,6 +209,8 @@ pub enum Packet {
     SourceQueryShort(SourceQueryShort),
     /// The short answer to it.
     SourceResponseShort(SourceResponseShort),
+    /// "The rekordbox source is here."
+    SourceAnnounce(SourceAnnounce),
     /// A well-formed datagram of a kind this crate does not model, including
     /// mixer status.
     Other {
@@ -223,6 +236,7 @@ impl Packet {
             Self::SourceResponse(_) => StatusKind::SOURCE_RESPONSE,
             Self::SourceQueryShort(_) => StatusKind::SOURCE_QUERY_SHORT,
             Self::SourceResponseShort(_) => StatusKind::SOURCE_RESPONSE_SHORT,
+            Self::SourceAnnounce(_) => StatusKind::SOURCE_ANNOUNCE,
             Self::Other { kind, .. } => *kind,
         }
     }
@@ -279,6 +293,9 @@ pub fn decode(data: &[u8]) -> Result<Packet> {
         }
         StatusKind::SOURCE_RESPONSE => {
             SourceResponse::parse(data).map_or_else(|_| other(), Packet::SourceResponse)
+        }
+        StatusKind::SOURCE_ANNOUNCE => {
+            SourceAnnounce::parse(data).map_or_else(|_| other(), Packet::SourceAnnounce)
         }
         StatusKind::SOURCE_QUERY_SHORT => {
             SourceQueryShort::parse(data).map_or_else(|_| other(), Packet::SourceQueryShort)
@@ -1770,6 +1787,54 @@ impl fmt::Debug for WaveformSettingsResponse {
         f.debug_struct("WaveformSettingsResponse")
             .field("sender", &self.sender())
             .field("color", &self.color())
+            .finish()
+    }
+}
+
+// -- source announce (0x16) --------------------------------------------------
+
+/// "The rekordbox source is here" — the datagram a deck lists a source by.
+///
+/// rekordbox sends it three times, right after answering a short source
+/// query ([`SourceQueryShort`]), and the ground-truth capture shows exactly
+/// one burst per deck boot. The body length field reads zero even though
+/// twelve zero bytes follow the header; the deck expects exactly this shape.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourceAnnounce {
+    raw: Vec<u8>,
+}
+
+impl SourceAnnounce {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x30;
+
+    /// Parse a source announce.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::SOURCE_ANNOUNCE, Self::LEN)?;
+        Ok(Self { raw: data.to_vec() })
+    }
+
+    header_accessors!();
+
+    /// Build the announce, verbatim in the shape of the ground truth.
+    pub fn build(name: DeviceName, sender: DeviceNumber) -> Self {
+        let mut raw = vec![0u8; Self::LEN];
+        write_header(&mut raw, StatusKind::SOURCE_ANNOUNCE, name, sender.get());
+        if let Some(slot) = raw.get_mut(OFF_SUBTYPE) {
+            *slot = 0x01;
+        }
+        // The body length field stays zero, as rekordbox writes it.
+        if let Some(field) = raw.get_mut(OFF_BODY_LEN..OFF_BODY_LEN + 2) {
+            field.fill(0);
+        }
+        Self { raw }
+    }
+}
+
+impl fmt::Debug for SourceAnnounce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourceAnnounce")
+            .field("sender", &self.sender())
             .finish()
     }
 }

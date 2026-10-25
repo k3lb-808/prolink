@@ -1107,7 +1107,7 @@ impl VirtualCdj {
                 };
                 let published = Published::of(&transport, media.as_ref());
                 let now = Instant::now();
-                if !status_due(last, now, published) {
+                if !status_due(last, now, published, announce_interval(&config)) {
                     continue;
                 }
                 if config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
@@ -1248,6 +1248,8 @@ impl VirtualCdj {
                     head = ?datagram.get(..24.min(len)).map(<[u8]>::to_vec),
                     "50002 datagram heard",
                 );
+                let mut browsing: std::collections::HashMap<u8, (u8, Instant)> =
+                    std::collections::HashMap::new();
                 let reply = match status::decode(datagram) {
                     // Not a query, but the packet that tells us what this deck
                     // has loaded from us — which is what lets a track row be
@@ -1256,6 +1258,32 @@ impl VirtualCdj {
                     Ok(status::Packet::CdjStatus(peer)) => {
                         observe_loaded(&loaded, ours, &peer);
                         observe_peer_slots(&peers, &peer);
+                        // rekordbox announces itself to a player whose status
+                        // says the browser is open: byte 0x113 reads 0x05
+                        // there and 0x07 on the idle home screen. Every
+                        // ground-truth announce batch rides such a moment, so
+                        // the deck's media query — and with it the listing —
+                        // follows the announce, not the identity handshake.
+                        let ui = datagram.get(0x113).copied().unwrap_or(0);
+                        let Some(player) = peer.sender() else { continue };
+                        let now = Instant::now();
+                        let entry = browsing.entry(player.get()).or_insert((0u8, now));
+                        let fire = ui == 0x05
+                            && (entry.0 != ui
+                                || now.saturating_duration_since(entry.1)
+                                    >= Duration::from_secs(5));
+                        *entry = (ui, now);
+                        if fire {
+                            let announce = status::SourceAnnounce::build(name, ours);
+                            let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
+                            for _ in 0..3 {
+                                if let Err(error) = socket.send_to(announce.as_bytes(), to).await {
+                                    warn!(%error, "could not announce the source");
+                                }
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            info!(player = %player, "announced the source to an open browser");
+                        }
                         None
                     }
                     // The answer to a question we asked. It is not addressed to
@@ -1275,9 +1303,28 @@ impl VirtualCdj {
                         Some((response.into_bytes(), *from.ip()))
                     }
                     Ok(status::Packet::SourceQueryShort(query)) => {
+                        // The deck asks this every five seconds until it is
+                        // answered. The two ground-truth exchanges agree on
+                        // the ingredients and disagree on the order: a booting
+                        // deck is satisfied by three fast source announces and
+                        // never sees a short response, a running deck retries
+                        // until the short response arrives. Send both, every
+                        // time — the announces first, as the boot capture has
+                        // them, then the short response.
+                        let announce = status::SourceAnnounce::build(name, ours);
                         let response = status::SourceResponseShort::build(name, ours);
-                        debug!(sender = %query.sender, "answered a short source query");
-                        Some((response.into_bytes(), *from.ip()))
+                        let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
+                        for _ in 0..3 {
+                            if let Err(error) = socket.send_to(announce.as_bytes(), to).await {
+                                warn!(%error, "could not announce the source");
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        if let Err(error) = socket.send_to(response.as_bytes(), to).await {
+                            warn!(%error, "could not answer the short source query");
+                        }
+                        info!(sender = %query.sender, "answered the short source query with announces");
+                        None
                     }
                     Ok(status::Packet::WaveformSettingsQuery(query)) => {
                         let response = status::WaveformSettingsResponse::build(
@@ -1608,12 +1655,26 @@ impl Published {
 /// Whether a status packet is due: every [`status::STATUS_INTERVAL`], and at
 /// once when what we publish changed, but never sooner than [`STATUS_FLOOR`]
 /// after the last one. `last` is when the last one went and what it said.
-fn status_due(last: Option<(Instant, Published)>, now: Instant, published: Published) -> bool {
+fn status_due(
+    last: Option<(Instant, Published)>,
+    now: Instant,
+    published: Published,
+    interval: Duration,
+) -> bool {
     let Some((sent, said)) = last else {
         return true;
     };
     let since = now.saturating_duration_since(sent);
-    since >= status::STATUS_INTERVAL || (published != said && since >= STATUS_FLOOR)
+    since >= interval || (published != said && since >= STATUS_FLOOR)
+}
+
+/// How often this device republishes its status: the source cadence for a
+/// rekordbox-class number, the player cadence otherwise.
+fn announce_interval(config: &VirtualCdjConfig) -> Duration {
+    match config.kind {
+        DeviceKind::REKORDBOX_OR_CDJ3000 => status::SOURCE_ANNOUNCE_INTERVAL,
+        _ => status::STATUS_INTERVAL,
+    }
 }
 
 fn status_packet(
@@ -1757,11 +1818,16 @@ async fn claim_one(
     // N is 3 into an empty network and 1 into a populated one (C13).
     let final_stage = if was_first { 3 } else { 1 };
     let mut stages: Vec<Body> = Vec::new();
-    for iteration in 1..=3 {
-        stages.push(Body::Hello {
-            payload: config.kind.role(),
-        });
-        let _ = iteration;
+    // rekordbox never hellos: the hello is a player's opening move, and a
+    // source that sends one reads as a player. The ground-truth capture shows
+    // the desktop application opening with claims only.
+    if config.kind != DeviceKind::REKORDBOX_OR_CDJ3000 {
+        for iteration in 1..=3 {
+            stages.push(Body::Hello {
+                payload: config.kind.role(),
+            });
+            let _ = iteration;
+        }
     }
     for iteration in 1..=3 {
         stages.push(Body::ClaimMac {
@@ -1781,11 +1847,16 @@ async fn claim_one(
             assignment_mode: djl::AssignmentMode::MANUAL,
         });
     }
-    for iteration in 1..=final_stage {
-        stages.push(Body::ClaimNumber {
-            device_number: candidate.get(),
-            iteration,
-        });
+    // Likewise the stage-3 number claim: that is the players' handshake, and
+    // it is what makes the mixer answer with a mixer-assign — which is how a
+    // player is recognised. rekordbox claims its number in the ClaimIp alone.
+    if config.kind != DeviceKind::REKORDBOX_OR_CDJ3000 {
+        for iteration in 1..=final_stage {
+            stages.push(Body::ClaimNumber {
+                device_number: candidate.get(),
+                iteration,
+            });
+        }
     }
 
     for body in stages {
