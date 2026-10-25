@@ -831,6 +831,11 @@ fn metadata(library: &Library, track_id: u32) -> Vec<MenuItem> {
                 ItemType::GENRE => (track.genre_id, track.genre.as_str()),
                 ItemType::DATE_ADDED => (track.id, track.date_added.as_str()),
                 ItemType::BITRATE => (track.bitrate, ""),
+                ItemType::YEAR => (u32::from(track.year), ""),
+                ItemType::ORIGINAL_ARTIST => {
+                    (track.original_artist_id, track.original_artist.as_str())
+                }
+                ItemType::REMIXER => (track.remixer_id, track.remixer.as_str()),
                 _ => (track.label_id, track.label.as_str()),
             };
             let mut item = MenuItem::named(id, slot.item_type, label);
@@ -871,6 +876,7 @@ fn track_info(library: &Library, track_id: u32) -> Vec<MenuItem> {
                 ItemType::TEMPO => (0, track.tempo, ""),
                 ItemType::COMMENT => (0, track.id, track.comment.as_str()),
                 ItemType::PATH => (track.file_size, track.id, track.file_path.as_str()),
+                ItemType::KEY => (0, track.key_id, track.key.as_str()),
                 _ => (0, 1, ""),
             };
             let mut item = MenuItem::named(id, item_type, label);

@@ -2471,7 +2471,7 @@ pub struct MetadataSlot {
 /// Items are emitted unconditionally, including empty ones: a real deck sends
 /// `label` with id 0 and no text rather than omitting it, and the count is what
 /// the client pages against.
-pub const METADATA_ITEMS: [MetadataSlot; 13] = [
+pub const METADATA_ITEMS: [MetadataSlot; 16] = [
     MetadataSlot {
         item_type: ItemType::TRACK_TITLE,
         argument0: 1,
@@ -2518,11 +2518,24 @@ pub const METADATA_ITEMS: [MetadataSlot; 13] = [
     },
     MetadataSlot {
         item_type: ItemType::BITRATE,
-        argument0: 1,
+        // the AZ's rekordbox source sends argument 0 zero on both of these.
+        argument0: 0,
     },
     MetadataSlot {
         item_type: ItemType::LABEL,
-        argument0: 1,
+        argument0: 0,
+    },
+    MetadataSlot {
+        item_type: ItemType::YEAR,
+        argument0: 0,
+    },
+    MetadataSlot {
+        item_type: ItemType::ORIGINAL_ARTIST,
+        argument0: 0,
+    },
+    MetadataSlot {
+        item_type: ItemType::REMIXER,
+        argument0: 0,
     },
 ];
 
@@ -2546,13 +2559,14 @@ pub const METADATA_ITEMS: [MetadataSlot; 13] = [
 ///   WAV and AIFF. Two earlier readings had these the other way round and the
 ///   errors cancelled for the only format that had ever been captured; serving
 ///   the disc number in item 1 makes a disc-2 MP3 announce itself as AAC (F35).
-pub const TRACK_INFO_ITEMS: [ItemType; 6] = [
+pub const TRACK_INFO_ITEMS: [ItemType; 7] = [
     ItemType::TRACK_TITLE,
     ItemType::DURATION,
     ItemType::TEMPO,
     ItemType::COMMENT,
     ItemType::PATH,
     ItemType::TRACK_INFO_UNKNOWN,
+    ItemType::KEY,
 ];
 
 #[cfg(test)]
