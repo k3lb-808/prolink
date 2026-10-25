@@ -970,10 +970,18 @@ impl VirtualCdj {
                 mac: self.interface.mac,
                 ip: self.interface.ip,
                 // Includes ourselves.
-                peer_count: u8::try_from(peers.saturating_add(1)).unwrap_or(u8::MAX),
+                peer_count: if self.config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+                    1
+                } else {
+                    u8::try_from(peers.saturating_add(1)).unwrap_or(u8::MAX)
+                },
                 pad_31: [0; 3],
                 flags: self.config.kind.role(),
-                trailing: self.config.generation,
+                trailing: if self.config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+                    0x08
+                } else {
+                    self.config.generation
+                },
             },
         )
     }
@@ -1421,10 +1429,21 @@ fn keep_alive_packet(
             },
             mac: interface.mac,
             ip: interface.ip,
-            peer_count: u8::try_from(peers.saturating_add(1)).unwrap_or(u8::MAX),
+            // The desktop application broadcasts a peer count of one and a
+            // generation of 0x08 in the AZ ground truth, whatever else is on
+            // the network: a pure source, participating in nothing.
+            peer_count: if config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+                1
+            } else {
+                u8::try_from(peers.saturating_add(1)).unwrap_or(u8::MAX)
+            },
             pad_31: [0; 3],
             flags: config.kind.role(),
-            trailing: config.generation,
+            trailing: if config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+                0x08
+            } else {
+                config.generation
+            },
         },
     )
 }
