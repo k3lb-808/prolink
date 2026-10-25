@@ -1127,10 +1127,11 @@ impl VirtualCdj {
                     if let Err(error) = shared.send_to(&packet, to).await {
                         debug!(%error, "source status broadcast failed");
                     }
-                    // …and publish the player status too: the slot occupancy
-                    // in it is what a deck reads before it asks what the slot
-                    // holds (F20), and the deck did not ask while it was
-                    // missing.
+                    // …and nothing else: the desktop application publishes no
+                    // player status at all, and a rekordbox-class number
+                    // emitting one reads as a player, not a source.
+                    last = Some((now, published));
+                    continue;
                 }
                 let peers = table.get();
                 let packet = status_packet(
