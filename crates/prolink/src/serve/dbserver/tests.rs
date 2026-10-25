@@ -895,7 +895,7 @@ fn the_pending_menu_table_is_bounded() {
     // browses. Nothing a deck has been observed to do comes near the bound.
     let mut session = Session::default();
     for count in 0..u32::try_from(MAX_PENDING_MENUS * 2).unwrap_or(0) {
-        session.remember(0x0102_0301, count, Vec::new());
+        session.remember(MessageKind::MENU_TRACK, 0x0102_0301, count, Vec::new());
     }
     assert_eq!(session.menus.len(), MAX_PENDING_MENUS);
     assert_eq!(session.order.len(), MAX_PENDING_MENUS);
@@ -2103,7 +2103,7 @@ mod eviction {
         let list = 0x0101_0301;
         let metadata = 0x0102_0301;
 
-        session.remember(list, 500, rows(500, 1_000_000));
+        session.remember(MessageKind::MENU_TRACK, list, 500, rows(500, 1_000_000));
 
         let polls = u32::try_from(MAX_PENDING_MENUS)
             .unwrap_or(u32::MAX)
@@ -2112,7 +2112,7 @@ mod eviction {
             // Each poll is a distinct key, as a real one is: the count is the
             // same thirteen but the descriptor's menu target differs, and a DJ
             // scrolling albums mints one key per album size besides.
-            session.remember(metadata + poll, 13, rows(13, poll));
+            session.remember(MessageKind::GET_METADATA, metadata + poll, 13, rows(13, poll));
             let paged = page(&mut session, &shared, list, 500);
             assert_eq!(
                 paged.len(),
@@ -2136,7 +2136,7 @@ mod eviction {
             .unwrap_or(u32::MAX)
             .saturating_mul(3);
         for index in 0..sets {
-            session.remember(index, 4, rows(4, index));
+            session.remember(MessageKind::GET_METADATA, index, 4, rows(4, index));
         }
         assert!(
             session.menus.len() <= MAX_PENDING_MENUS,

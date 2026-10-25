@@ -34,7 +34,7 @@
 use std::time::Duration;
 
 use prolink_proto::analysis::{self, Cue, PrefixWord};
-use prolink_proto::dbserver::{Arguments, Field, MediaInfo, Message, MessageKind};
+use prolink_proto::dbserver::{Arguments, Field, MediaInfo, Message, MessageKind, MenuItem};
 use prolink_rekordbox::FourCc;
 
 use crate::serve::Medium;
@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The blob of a whole tag chunk, with the byte length typed in front: what
 /// the AZ-era analysis-tag handler serves, restated for pushes.
-fn tag_chunk(medium: Option<&Medium>, track_id: u32, fourcc: FourCc) -> Vec<u8> {
+pub(super) fn tag_chunk(medium: Option<&Medium>, track_id: u32, fourcc: FourCc) -> Vec<u8> {
     let mut out = Vec::new();
     if let Some(medium) = medium {
         let parsed = medium.analysis(track_id);
@@ -67,6 +67,63 @@ static PUSH_TXN: AtomicU32 = AtomicU32::new(0x7000_0000);
 
 fn push_txn() -> u32 {
     PUSH_TXN.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The PWV6 tag and the artwork of one rendered track row, appended right
+/// after the footer of the render that drew it — exactly what the rekordbox
+/// capture pushes after a track list's menu items, per visible row, in row
+/// order, which is what puts the coloured three-band column on the deck.
+/// The tag echoes the raw-tag request type the deck also makes (`0x2d04`),
+/// the artwork echoes `GET_ARTWORK`.
+///
+/// `false` means the row drew nothing at all: a row without a track id, and
+/// a track whose medium carries no PWV6 — a deck is not shown a cover where
+/// there is no wave to sit across. An empty artwork draws no artwork push,
+/// which is ordinary. The caller caps how many rows get pushed, because a
+/// render only shows what a screen holds and a 64-row page served whole
+/// would be far more than rekordbox pushes.
+pub(super) fn push_row(
+    medium: Option<&Medium>,
+    item: &MenuItem,
+    mut out: impl FnMut(&Message),
+) -> bool {
+    let track_id = item.id;
+    if track_id == 0 || item.flags & MenuItem::TRACK_FLAGS == 0 {
+        return false;
+    }
+    let payload = tag_chunk(medium, track_id, FourCc(*b"PWV6"));
+    if payload.is_empty() {
+        return false;
+    }
+    let mut done = false;
+    if let Some(message) = Message::binary_reply(
+        push_txn(),
+        MessageKind::ANALYSIS_TAG,
+        MessageKind(0x2d04),
+        payload,
+        &[1],
+    ) {
+        out(&message);
+        tracing::debug!(track_id, "pushed three-band tag");
+        done = true;
+    }
+    let image = medium
+        .map(|medium| medium.artwork(item.artwork_id))
+        .unwrap_or_default();
+    if image.is_empty() {
+        return done;
+    }
+    if let Some(message) = Message::binary_reply(
+        push_txn(),
+        MessageKind::ARTWORK,
+        MessageKind::GET_ARTWORK,
+        image,
+        &[],
+    ) {
+        out(&message);
+        tracing::debug!(track_id, "pushed artwork");
+    }
+    done
 }
 
 /// The unsolicited analysis bundle a rekordbox source pushes right after it

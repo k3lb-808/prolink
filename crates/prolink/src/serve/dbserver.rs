@@ -569,19 +569,60 @@ enum Flow {
     Close,
 }
 
+/// How many rendered rows get the unsolicited per-row pushes.
+///
+/// A rekordbox source pushes every visible row's three-band waveform tag and
+/// artwork right after the footer of a track-menu render, and the visible
+/// page of a ground-truth capture held 33 rows (~az capture): we stop one
+/// short of that, so a deck that asks for sixty-four at once gets the same
+/// bundle a deck that pages six at a time gets per page.
+const PUSHED_ROWS: usize = 32;
+
 /// One connection's menu state.
 #[derive(Debug, Default)]
 struct Session {
     /// Result sets awaiting render, keyed on `(descriptor, item count)` — see
     /// the module documentation for why the count alone is not enough (F41).
-    menus: BTreeMap<(u32, u32), Arc<Vec<MenuItem>>>,
+    ///
+    /// The request kind rides along: a render must tell a track listing —
+    /// whose rows draw the unsolicited pushes — from the one-track polls a
+    /// deck fires every couple of seconds while it plays, whose keys can
+    /// collide with a listing's.
+    menus: BTreeMap<(u32, u32), Arc<ResultSet>>,
     /// Insertion order, so the bound on [`Session::menus`] can evict the oldest.
     order: VecDeque<(u32, u32)>,
     /// The most recent result set per descriptor, and the most recent of all,
     /// for a client that pages a set we never established. An empty page would
     /// look like a menu that vanished, which is worse than the wrong menu.
-    recent: BTreeMap<u32, Arc<Vec<MenuItem>>>,
-    last: Arc<Vec<MenuItem>>,
+    recent: BTreeMap<u32, Arc<ResultSet>>,
+    last: Arc<ResultSet>,
+}
+
+/// A remembered result set: the kind of request that built it, and its rows.
+#[derive(Debug)]
+struct ResultSet {
+    kind: MessageKind,
+    items: Arc<Vec<MenuItem>>,
+}
+
+impl Default for ResultSet {
+    fn default() -> Self {
+        // An empty set of no particular kind, which is exactly what `Session`
+        // has to fall back on before the first result set is established.
+        Self {
+            kind: MessageKind(0),
+            items: Arc::default(),
+        }
+    }
+}
+
+impl ResultSet {
+    fn new(kind: MessageKind, items: Vec<MenuItem>) -> Self {
+        Self {
+            kind,
+            items: Arc::new(items),
+        }
+    }
 }
 
 impl Session {
@@ -688,7 +729,7 @@ impl Session {
         if let Some(items) = menu::build(kind, &message.args, medium, &tags) {
             let count = u32::try_from(items.len()).unwrap_or(u32::MAX);
             let raw = descriptor.map_or(0, Descriptor::to_raw);
-            self.remember(raw, count, items);
+            self.remember(kind, raw, count, items);
             push(out, &Message::success(transaction, kind, count));
         } else {
             // Not a menu, and not a request this module understands. A bare
@@ -717,12 +758,12 @@ impl Session {
     /// Touching on render (see [`Self::render`]) makes the set being paged the
     /// *newest* rather than the oldest, so the eviction candidates are the
     /// transient metadata menus, which is what a bound is for.
-    fn remember(&mut self, descriptor: u32, count: u32, items: Vec<MenuItem>) {
+    fn remember(&mut self, kind: MessageKind, descriptor: u32, count: u32, items: Vec<MenuItem>) {
         let key = (descriptor, count);
-        let items = Arc::new(items);
-        self.last = Arc::clone(&items);
-        self.recent.insert(descriptor, Arc::clone(&items));
-        self.menus.insert(key, items);
+        let set = Arc::new(ResultSet::new(kind, items));
+        self.last = Arc::clone(&set);
+        self.recent.insert(descriptor, Arc::clone(&set));
+        self.menus.insert(key, set);
         self.touch(key);
         self.evict();
     }
@@ -746,7 +787,9 @@ impl Session {
                 if self
                     .recent
                     .get(&oldest.0)
-                    .is_some_and(|items| u32::try_from(items.len()).unwrap_or(u32::MAX) == oldest.1)
+                    .is_some_and(|set| {
+                        u32::try_from(set.items.len()).unwrap_or(u32::MAX) == oldest.1
+                    })
                     && !self.order.iter().any(|key| key.0 == oldest.0)
                 {
                     self.recent.remove(&oldest.0);
@@ -781,12 +824,13 @@ impl Session {
         let total = message.number(4).unwrap_or(0);
 
         let key = (descriptor, total);
-        let items = self
+        let set = self
             .menus
             .get(&key)
             .or_else(|| self.recent.get(&descriptor))
             .unwrap_or(&self.last)
             .clone();
+        let items = &set.items;
         // Paging a set is using it, so it must not become the eviction
         // candidate. Without this, the list a DJ scrolls for a minute is
         // exactly the set the bound throws away.
@@ -818,6 +862,31 @@ impl Session {
             );
         }
         push(out, &Message::menu_footer(transaction));
+
+        // The unsolicited bundle a rekordbox source appends after the footer
+        // of a track-menu render: every visible row's three-band waveform tag
+        // (PWV6, echo `0x2d04`) then that row's artwork (echo `0x2003`), in
+        // row order, agreeing with what slave decks replay out of a rekordbox
+        // capture. Nothing ahead of this render changes, and rows without a
+        // wave or without a track are pushed nothing.
+        if menu::is_track_listing(set.kind)
+            && let Some(descriptor) = parsed
+        {
+            let medium = shared.medium(descriptor.slot);
+            let medium = medium.as_deref();
+            let mut pushed = 0;
+            for item in items.iter().skip(offset).take(limit) {
+                if pushed == PUSHED_ROWS {
+                    break;
+                }
+                if item.flags & MenuItem::TRACK_FLAGS == 0 || item.id == 0 {
+                    continue;
+                }
+                if analysis::push_row(medium, item, |message| push(out, message)) {
+                    pushed += 1;
+                }
+            }
+        }
     }
 }
 

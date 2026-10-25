@@ -253,6 +253,26 @@ fn is_about_one_track(kind: MessageKind) -> bool {
     )
 }
 
+/// Whether the rows of a render are shown off a **track listing**, so a
+/// rekordbox source pushes each visible row's PWV6 tag and artwork straight
+/// after the footer.
+///
+/// Not the one-track polls: a deck asks those every couple of seconds while it
+/// plays, and a push bundle on every one of them is megabytes for nothing.
+/// The other non-track menus need no excluding: their rows never carry the
+/// track flags the render's push loop looks for, so only the listings above
+/// ever push anything out of them.
+pub(super) fn is_track_listing(kind: MessageKind) -> bool {
+    !is_about_one_track(kind)
+        && (matches!(
+            kind,
+            MessageKind::MENU_TRACK
+                | MessageKind::MENU_PLAYLIST
+                | MessageKind::MENU_TAG_LIST
+                | MessageKind::MENU_SEARCH
+        ) || Drill::parse(kind).is_some())
+}
+
 /// Whether `kind` is a menu request at all, used only to decide what an
 /// unserved slot answers with.
 fn is_menu(kind: MessageKind) -> bool {
