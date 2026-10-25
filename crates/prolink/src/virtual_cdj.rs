@@ -1119,8 +1119,10 @@ impl VirtualCdj {
                     if let Err(error) = shared.send_to(&packet, to).await {
                         debug!(%error, "source status broadcast failed");
                     }
-                    last = Some((now, published));
-                    continue;
+                    // …and publish the player status too: the slot occupancy
+                    // in it is what a deck reads before it asks what the slot
+                    // holds (F20), and the deck did not ask while it was
+                    // missing.
                 }
                 let peers = table.get();
                 let packet = status_packet(
