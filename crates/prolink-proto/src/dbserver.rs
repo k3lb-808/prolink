@@ -3389,25 +3389,26 @@ mod tests {
     }
 
     #[test]
-    fn a_metadata_reply_is_thirteen_items_in_a_fixed_order() {
-        assert_eq!(METADATA_ITEMS.len(), 13);
+    fn a_metadata_reply_is_sixteen_items_in_a_fixed_order() {
+        assert_eq!(METADATA_ITEMS.len(), 16);
         let types: Vec<u32> = METADATA_ITEMS.iter().map(|slot| slot.item_type.0).collect();
         assert_eq!(
             types,
             [
-                0x04, 0x07, 0x02, 0x0b, 0x0d, 0x23, 0x0f, 0x0a, 0x13, 0x06, 0x2e, 0x10, 0x0e
+                0x04, 0x07, 0x02, 0x0b, 0x0d, 0x23, 0x0f, 0x0a, 0x13, 0x06, 0x2e, 0x10, 0x0e,
+                0x11, 0x28, 0x29
             ],
             "title, artist, album, duration, tempo, comment, key, rating, \
-             colour, genre, date added, bitrate, label"
+             colour, genre, date added, bitrate, label, year, original artist, remixer"
         );
-        // Argument 0 is 1 on eight of them and 0 on five, matching no rule
+        // Argument 0 is 1 on six of them and 0 on ten, matching no rule
         // anyone has named.
         let ones = METADATA_ITEMS
             .iter()
             .filter(|slot| slot.argument0 == 1)
             .count();
-        assert_eq!(ones, 8);
-        assert_eq!(METADATA_ITEMS.len() - ones, 5);
+        assert_eq!(ones, 6);
+        assert_eq!(METADATA_ITEMS.len() - ones, 10);
     }
 
     #[test]
@@ -3450,10 +3451,10 @@ mod tests {
     }
 
     #[test]
-    fn a_track_info_reply_is_six_items_and_argument_zero_is_the_file_size() {
-        assert_eq!(TRACK_INFO_ITEMS.len(), 6);
+    fn a_track_info_reply_is_seven_items_and_argument_zero_is_the_file_size() {
+        assert_eq!(TRACK_INFO_ITEMS.len(), 7);
         let types: Vec<u32> = TRACK_INFO_ITEMS.iter().map(|item| item.0).collect();
-        assert_eq!(types, [0x04, 0x0b, 0x0d, 0x23, 0x00, 0x2f]);
+        assert_eq!(types, [0x04, 0x0b, 0x0d, 0x23, 0x00, 0x2f, 0x0f]);
 
         let raw = hex(TRACK_INFO_PATH_ITEM);
         let (message, _) = Message::decode(&raw).unwrap();

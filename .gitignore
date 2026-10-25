@@ -13,3 +13,4 @@ Cargo.lock.orig
 *.pcapng
 !captures/**
 !emu-captures/**
+__pycache__/

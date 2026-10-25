@@ -78,7 +78,7 @@ use prolink_proto::{
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::discovery::Discovery;
 use crate::media::{MediaDescription, MediaSource, NoMedia};
@@ -1217,6 +1217,10 @@ impl VirtualCdj {
 
         tokio::spawn(async move {
             let mut buffer = vec![0u8; MAX_DATAGRAM];
+            // Per-player browser state for the announce trigger, kept across
+            // datagrams: the last ui byte seen and when it last fired.
+            let mut browsing: std::collections::HashMap<u8, (u8, Instant)> =
+                std::collections::HashMap::new();
             loop {
                 let (len, from) = match socket.recv_from(&mut buffer).await {
                     Ok(received) => received,
@@ -1241,15 +1245,13 @@ impl VirtualCdj {
                     let _ = tap.send(Arc::new(datagram.to_vec()));
                 }
 
-                debug!(
+                trace!(
                     %from,
                     kind = datagram.get(10).copied().unwrap_or(0),
                     bytes = len,
                     head = ?datagram.get(..24.min(len)).map(<[u8]>::to_vec),
                     "50002 datagram heard",
                 );
-                let mut browsing: std::collections::HashMap<u8, (u8, Instant)> =
-                    std::collections::HashMap::new();
                 let reply = match status::decode(datagram) {
                     // Not a query, but the packet that tells us what this deck
                     // has loaded from us — which is what lets a track row be
@@ -2490,18 +2492,33 @@ mod tests {
         let sent = Instant::now();
         let master = published(true, None);
         let ms = |n: u64| sent + Duration::from_millis(n);
-        assert!(status_due(None, sent, master), "the first one goes at once");
+        let cadence = status::STATUS_INTERVAL;
+        assert!(
+            status_due(None, sent, master, cadence),
+            "the first one goes at once"
+        );
         let last = Some((sent, master));
-        assert!(!status_due(last, ms(100), master), "nothing new: wait");
-        assert!(!status_due(last, ms(199), master));
-        assert!(status_due(last, ms(200), master), "the 200 ms cadence");
+        assert!(!status_due(last, ms(100), master, cadence), "nothing new: wait");
+        assert!(!status_due(last, ms(199), master, cadence));
+        assert!(
+            status_due(last, ms(200), master, cadence),
+            "the 200 ms cadence"
+        );
+
+        // A rekordbox-class source republishes twice as often: the desktop
+        // application broadcasts its source status every 100 ms.
+        let source = status::SOURCE_ANNOUNCE_INTERVAL;
+        assert!(
+            status_due(last, ms(100), master, source),
+            "the 100 ms source cadence"
+        );
 
         // Naming a successor is news a requester acts on: S28's holders sent
         // it 3.3-5.2 ms after the request.
         let handing_over = published(true, Some(2));
-        assert!(status_due(last, ms(62), handing_over));
+        assert!(status_due(last, ms(62), handing_over, cadence));
         assert!(
-            !status_due(last, ms(61), handing_over),
+            !status_due(last, ms(61), handing_over, cadence),
             "but never sooner than 62 ms after the last packet: S28's floor"
         );
     }

@@ -841,8 +841,8 @@ fn a_metadata_menu_does_not_evict_a_track_list_of_the_same_size() {
     let metadata_replies = ask(&mut session, &shared, &metadata);
     assert_eq!(
         metadata_replies[0].number(1),
-        Some(13),
-        "thirteen items (F32)"
+        Some(16),
+        "sixteen items (F32)"
     );
 
     // The deck now resumes the album at the next offset without re-issuing the
@@ -1567,7 +1567,7 @@ fn metadata_is_thirteen_items_each_carrying_the_row_it_references() {
         &shared,
         &menu(MessageKind::GET_METADATA, &[track_id]),
     );
-    assert_eq!(rows.len(), 13);
+    assert_eq!(rows.len(), 16);
     let types: Vec<ItemType> = rows.iter().map(|row| row.item_type).collect();
     assert_eq!(
         types,
@@ -1640,7 +1640,7 @@ fn track_info_is_six_items_with_the_container_first_and_the_file_size_on_the_pat
         &shared,
         &menu(MessageKind::GET_TRACK_INFO, &[track_id]),
     );
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
     assert_eq!(
         rows.iter().map(|row| row.item_type).collect::<Vec<_>>(),
         TRACK_INFO_ITEMS.to_vec()

@@ -2493,6 +2493,28 @@ mod tests {
     }
 
     #[test]
+    fn a_source_announce_matches_the_ground_truth_byte_for_byte() {
+        // rekordbox's announce to a deck it is listing itself to: 48 bytes,
+        // the body length field left at zero, twelve zero bytes trailing.
+        let announce = SourceAnnounce::build(
+            DeviceName::new("rekordbox"),
+            DeviceNumber::new(0x29).unwrap(),
+        );
+        let expected: Vec<u8> = [
+            0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x16, 0x72, 0x65, 0x6b,
+            0x6f, 0x72, 0x64, 0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x01, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+        .to_vec();
+        assert_eq!(announce.as_bytes(), &expected[..]);
+        let parsed = SourceAnnounce::parse(&expected).unwrap();
+        assert_eq!(parsed.sender(), Some(device(0x29)));
+        assert_eq!(parsed.subtype(), 0x01);
+        assert_eq!(parsed.name(), DeviceName::new("rekordbox"));
+    }
+
+    #[test]
     fn decoding_dispatches_on_the_kind_byte() {
         let status = CdjStatus::builder().device_number(device(1)).build();
         assert!(matches!(

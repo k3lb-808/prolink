@@ -630,7 +630,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_sd_and_usb_can_be_served() {
+    fn the_library_slots_can_be_served() {
         assert_eq!(ServedSlot::new(Slot::USB), Some(ServedSlot::USB));
         assert_eq!(ServedSlot::new(Slot::SD), Some(ServedSlot::SD));
         assert_eq!(
@@ -638,7 +638,12 @@ mod tests {
             None,
             "a CD has no rekordbox export"
         );
-        assert_eq!(ServedSlot::new(Slot::REKORDBOX), None);
+        // The rekordbox slot is the desktop application's own collection, and
+        // this server serves one; the AZ generation mounts it like any other.
+        assert_eq!(
+            ServedSlot::new(Slot::REKORDBOX),
+            Some(ServedSlot::REKORDBOX)
+        );
         assert_eq!(ServedSlot::new(Slot::NONE), None);
     }
 
