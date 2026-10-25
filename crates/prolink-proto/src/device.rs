@@ -93,11 +93,15 @@ impl fmt::Display for DeviceNumber {
 pub struct BrowsableDeviceNumber(DeviceNumber);
 
 impl BrowsableDeviceNumber {
-    /// Parse a browsable device number, rejecting zero and anything above 4.
+    /// Parse a browsable device number: a player number, or one of the numbers
+    /// a rekordbox Link-Export source holds — the AZ-generation ground truth
+    /// has rekordbox claiming `0x11`, `0x12` and `0x29`–`0x2c`, holding `0x29`
+    /// steady, and every deck-side reference to the source names that number.
     pub const fn new(raw: u8) -> Option<Self> {
         match DeviceNumber::new(raw) {
-            Some(number) => number.browsable(),
-            None => None,
+            Some(number) if number.get() <= DeviceNumber::MAX_BROWSABLE => Some(Self(number)),
+            Some(number) if matches!(number.get(), 0x11 | 0x12 | 0x29..=0x2c) => Some(Self(number)),
+            _ => None,
         }
     }
 

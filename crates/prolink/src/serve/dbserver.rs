@@ -89,8 +89,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use prolink_proto::dbserver::{
-    self, Descriptor, MAX_RENDER_BATCH, MenuItem, Message, MessageKind, PORT, PORT_QUERY_PORT,
-    PREAMBLE,
+    self, Descriptor, Field, MAX_RENDER_BATCH, MenuItem, Message, MessageKind, PORT,
+    PORT_QUERY_PORT, PREAMBLE,
 };
 use prolink_proto::{BrowsableDeviceNumber, Slot};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -494,8 +494,33 @@ async fn serve(mut stream: TcpStream, shared: &Shared) -> Result<()> {
         .await
         .map_err(Error::io("answering the dbserver preamble"))?;
 
+    // A bare `0x00` after the preamble is the AZ generation's open: the deck
+    // sends it and then waits for the source to introduce itself — kind
+    // `0x0000` under the setup transaction, carrying our device number and the
+    // `0x14` every ground truth opens with. A deck that instead opens with a
+    // full `INTRODUCE` request (the older generation's way) is answered by the
+    // handler below, and gets no push from here.
+    if buffer.is_empty()
+        && read_more(&mut stream, &mut buffer).await? == 0
+    {
+        return Ok(());
+    }
     let mut session = Session::default();
     let mut out = Vec::new();
+    if buffer.first() == Some(&0x00) {
+        buffer.drain(..1);
+        push(
+            &mut out,
+            &Message::new(
+                dbserver::SETUP_TRANSACTION_ID,
+                MessageKind::INTRODUCE,
+                [
+                    Field::U32(u32::from(shared.device.number().get())),
+                    Field::U32(0x14),
+                ],
+            ),
+        );
+    }
     loop {
         let mut consumed = 0;
         let mut closing = false;
