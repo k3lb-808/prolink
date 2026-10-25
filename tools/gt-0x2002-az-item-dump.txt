@@ -1,0 +1,15 @@
+at=30545 tx=0x00000015 kind=0x4000 SUCCESS argc=2
+   arg0: 4610
+   arg1: 1
+at=30609 tx=0x00000017 kind=0x4000 SUCCESS argc=2
+   arg0: 4610
+   arg1: 1
+at=30865 tx=0x00000019 kind=0x4000 SUCCESS argc=2
+   arg0: 8194
+   arg1: 16
+at=33095 tx=0x0000001b kind=0x4000 SUCCESS argc=2
+   arg0: 8450
+   arg1: 7
+at=34147 tx=0x0000001d kind=0x4000 SUCCESS argc=2
+   arg0: 8194
+   arg1: 16

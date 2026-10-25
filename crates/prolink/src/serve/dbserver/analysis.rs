@@ -175,7 +175,7 @@ pub(super) fn reply(
         let all = extended(medium, track_id);
         let count = all.len() as u32;
         let mut payload = Vec::with_capacity(all.len() * 136);
-        for (hot_cue, ty, time_ms, loop_ms, comment, _r, _g, _b) in all.into_iter() {
+        for (hot_cue, ty, time_ms, loop_ms, comment, cix, r, g, b) in all.into_iter() {
             let bytes: Vec<u8> = comment.encode_utf16().chain([0u16])
                 .flat_map(|u| u.to_le_bytes())
                 .collect();
@@ -194,15 +194,21 @@ pub(super) fn reply(
             rec[0x4a..0x4a + bytes.len()].copy_from_slice(&bytes);
             let tail = 0x4a + bytes.len();
             rec[tail..tail + 4].copy_from_slice(&0x2cu32.to_le_bytes());
-            // ground-truth palette cycle: red, purple, green, light-blue
-            let palette: [[u8; 4]; 4] = [
-                [0x2a, 0xff, 0x00, 0x00],
-                [0x38, 0xb3, 0x00, 0xff],
-                [0x16, 0x1a, 0xff, 0x00],
-                [0x09, 0x00, 0xe0, 0xff],
-            ];
-            rec[tail + 4..tail + 8]
-                .copy_from_slice(&palette[(hot_cue as usize) % 4]);
+            // The cue's own colour as rekordbox's PCO2/PCP2 record carries
+            // it: [colour index][R][G][B]; fall back to the ground-truth
+            // palette cycle when the medium records none.
+            let colour = if r == 0 && g == 0 && b == 0 && cix == 0 {
+                let palette: [[u8; 4]; 4] = [
+                    [0x2a, 0xff, 0x00, 0x00],
+                    [0x38, 0xb3, 0x00, 0xff],
+                    [0x16, 0x1a, 0xff, 0x00],
+                    [0x09, 0x00, 0xe0, 0xff],
+                ];
+                palette[(hot_cue as usize) % 4]
+            } else {
+                [cix, r, g, b]
+            };
+            rec[tail + 4..tail + 8].copy_from_slice(&colour);
             payload.extend_from_slice(&rec);
         }
         return Message::binary_reply(
@@ -488,7 +494,7 @@ fn cues(medium: Option<&Medium>, track_id: u32) -> Vec<Cue> {
 fn extended(
     medium: Option<&Medium>,
     track_id: u32,
-) -> Vec<(u32, u8, u32, u32, String, u8, u8, u8)> {
+) -> Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8)> {
     let Some(medium) = medium else {
         return Vec::new();
     };
@@ -504,6 +510,7 @@ fn extended(
             out.push((
                 pad, ty, cue.time, cue.loop_time,
                 cue.comment.clone(),
+                cue.hot_cue_color_index,
                 cue.hot_cue_color_red, cue.hot_cue_color_green, cue.hot_cue_color_blue,
             ));
         }
