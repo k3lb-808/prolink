@@ -156,14 +156,21 @@ impl DeviceKind {
     /// Seen only in the CDJ-3000 hello.
     pub const CDJ3000_HELLO: Self = Self(0x04);
 
-    /// The `0x01` CDJ / `0x02` mixer role byte that recurs across packet kinds.
+    /// The role byte that recurs across packet kinds: `0x01` CDJ, `0x02`
+    /// mixer, `0x04` rekordbox.
     ///
     /// Appears at offset `0x30` of the stage-2 claim and at `0x34` of the
-    /// keep-alive, and tracks the device kind in both. The pre-hardware
-    /// literature documents the first as a constant `0x01`; a real
-    /// DJM-2000nexus sends `0x02` (C1).
+    /// keep-alive. The pre-hardware literature documents the first as a
+    /// constant `0x01`; a real DJM-2000nexus sends `0x02` (C1), and the
+    /// XDJ-AZ ground truth has rekordbox sending `0x04` in both places while the
+    /// decks keep `0x01` (so the kind byte alone does not separate a deck
+    /// from the desktop application).
     pub fn role(self) -> u8 {
-        if self == Self::MIXER { 0x02 } else { 0x01 }
+        match self {
+            Self::MIXER => 0x02,
+            Self::REKORDBOX_OR_CDJ3000 | Self::CDJ3000_HELLO => 0x04,
+            _ => 0x01,
+        }
     }
 }
 
