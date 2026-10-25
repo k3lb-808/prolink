@@ -1218,6 +1218,20 @@ impl VirtualCdj {
                         answer_media_query(query, ours, name, media.as_ref())
                             .map(|reply| (reply, query.requester_ip))
                     }
+                    Ok(status::Packet::WaveformSettingsQuery(query)) => {
+                        let response = status::WaveformSettingsResponse::build(
+                            name,
+                            ours,
+                            status::WaveformSettingsResponse::COLOR_THREE_BAND,
+                        );
+                        info!(
+                            sender = %query.sender,
+                            bytes = response.as_bytes().len(),
+                            color = response.color().map(u32::from),
+                            "answered a waveform settings query",
+                        );
+                        Some((response.into_bytes(), *from.ip()))
+                    }
                     Ok(status::Packet::SettingsQuery(query)) => {
                         let settings = media.settings(query.slot);
                         let response = status::SettingsResponse::build(

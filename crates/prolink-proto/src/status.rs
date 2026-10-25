@@ -97,6 +97,11 @@ impl StatusKind {
     pub const SETTINGS_QUERY: Self = Self(0x35);
     /// The answer to a [`Self::SETTINGS_QUERY`].
     pub const SETTINGS_RESPONSE: Self = Self(0x36);
+    /// "Describe the waveform settings you serve" — the AZ generation asks
+    /// once, when the link comes up.
+    pub const WF_SETTINGS_QUERY: Self = Self(0x46);
+    /// The answer to a [`Self::WF_SETTINGS_QUERY`].
+    pub const WF_SETTINGS_RESPONSE: Self = Self(0x47);
 
     /// A name for logs, or `None` for a kind we have never observed.
     pub fn name(self) -> Option<&'static str> {
@@ -107,6 +112,8 @@ impl StatusKind {
             Self::MIXER_STATUS => "mixer_status",
             Self::SETTINGS_QUERY => "settings_query",
             Self::SETTINGS_RESPONSE => "settings_response",
+            Self::WF_SETTINGS_QUERY => "wf_settings_query",
+            Self::WF_SETTINGS_RESPONSE => "wf_settings_response",
             _ => return None,
         })
     }
@@ -166,6 +173,10 @@ pub enum Packet {
     SettingsQuery(SettingsQuery),
     /// The settings from a medium, inline.
     SettingsResponse(SettingsResponse),
+    /// "Describe the waveform settings you serve."
+    WaveformSettingsQuery(WaveformSettingsQuery),
+    /// The waveform settings of a source, inline.
+    WaveformSettingsResponse(WaveformSettingsResponse),
     /// A well-formed datagram of a kind this crate does not model, including
     /// mixer status.
     Other {
@@ -185,6 +196,8 @@ impl Packet {
             Self::MediaResponse(_) => StatusKind::MEDIA_RESPONSE,
             Self::SettingsQuery(_) => StatusKind::SETTINGS_QUERY,
             Self::SettingsResponse(_) => StatusKind::SETTINGS_RESPONSE,
+            Self::WaveformSettingsQuery(_) => StatusKind::WF_SETTINGS_QUERY,
+            Self::WaveformSettingsResponse(_) => StatusKind::WF_SETTINGS_RESPONSE,
             Self::Other { kind, .. } => *kind,
         }
     }
@@ -232,6 +245,10 @@ pub fn decode(data: &[u8]) -> Result<Packet> {
         StatusKind::SETTINGS_RESPONSE => {
             SettingsResponse::parse(data).map_or_else(|_| other(), Packet::SettingsResponse)
         }
+        StatusKind::WF_SETTINGS_QUERY => WaveformSettingsQuery::parse(data)
+            .map_or_else(|_| other(), Packet::WaveformSettingsQuery),
+        StatusKind::WF_SETTINGS_RESPONSE => WaveformSettingsResponse::parse(data)
+            .map_or_else(|_| other(), Packet::WaveformSettingsResponse),
         _ => other(),
     })
 }
@@ -1611,6 +1628,112 @@ impl fmt::Debug for SettingsResponse {
             .field("requester", &self.requester())
             .field("slot", &self.slot())
             .field("payload_len", &self.payload().len())
+            .finish()
+    }
+}
+
+// -- waveform settings (0x46 / 0x47) ---------------------------------------
+
+/// "Describe the waveform settings you serve" — a query a deck sends once,
+/// when the link comes up.
+///
+/// The AZ generation replaced the medium settings query
+/// ([`StatusKind::SETTINGS_QUERY`]) with this one, and the answer decides how
+/// the deck draws every waveform it loads from the source: three ground-truth
+/// captures that differed in exactly one byte of the answer are what settled
+/// the layout, and that byte picks the waveform colour.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaveformSettingsQuery {
+    /// The device asking, from byte `0x21`.
+    pub sender: DeviceNumber,
+}
+
+impl WaveformSettingsQuery {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x28;
+
+    /// Parse a waveform settings query.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::WF_SETTINGS_QUERY, Self::LEN)?;
+        let sender = DeviceNumber::new(byte_at(data, OFF_SENDER).unwrap_or(0))
+            .ok_or_else(|| Error::malformed(OFF_SENDER, "waveform settings query from device 0"))?;
+        Ok(Self { sender })
+    }
+}
+
+/// The waveform settings of a source, carried inline in the answer to a
+/// [`WaveformSettingsQuery`].
+///
+/// The body opens with the tag id the deck itself uses for waveform-preview
+/// work (`0x2904`), then the settings magic [`SettingsResponse::MAGIC`] — the
+/// same `0x12345678` that leads `PIONEER/MYSETTING.DAT` — then the settings
+/// block whose one varying byte is the waveform colour: `0x01` blue, `0x03`
+/// RGB, `0x04` 3Band.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WaveformSettingsResponse {
+    raw: Vec<u8>,
+}
+
+impl WaveformSettingsResponse {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x48;
+
+    /// The byte of the settings block that picks the waveform colour.
+    pub const OFF_COLOR: usize = 0x32;
+
+    /// Blue waveforms.
+    pub const COLOR_BLUE: u8 = 0x01;
+    /// RGB (three-colour) waveforms.
+    pub const COLOR_RGB: u8 = 0x03;
+    /// 3Band (low / mid / high) waveforms.
+    pub const COLOR_THREE_BAND: u8 = 0x04;
+
+    /// Parse a waveform settings response.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::WF_SETTINGS_RESPONSE, Self::LEN)?;
+        Ok(Self { raw: data.to_vec() })
+    }
+
+    header_accessors!();
+
+    /// The waveform colour the answer carries.
+    pub fn color(&self) -> Option<u8> {
+        byte_at(&self.raw, Self::OFF_COLOR)
+    }
+
+    /// Build the answer with waveform colour `color`, everything else verbatim
+    /// from the ground truth.
+    pub fn build(name: DeviceName, sender: DeviceNumber, color: u8) -> Self {
+        let mut raw = vec![0u8; Self::LEN];
+        write_header(&mut raw, StatusKind::WF_SETTINGS_RESPONSE, name, sender.get());
+        if let Some(slot) = raw.get_mut(OFF_SUBTYPE) {
+            *slot = 0x01;
+        }
+        // `0x2904 0000`, the settings magic, a count of one, and the leading
+        // pair of the settings block; the colour byte and its two followers
+        // go in below, and the body ends in zeroes.
+        let body: [u8; 14] = [
+            0x29, 0x04, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01,
+        ];
+        if let Some(field) = raw.get_mut(BODY_START..BODY_START + body.len()) {
+            field.copy_from_slice(&body);
+        }
+        if let Some(slot) = raw.get_mut(Self::OFF_COLOR) {
+            *slot = color;
+        }
+        let tail: [u8; 3] = [0x01, 0x02, 0x01];
+        if let Some(field) = raw.get_mut(Self::OFF_COLOR + 1..Self::OFF_COLOR + 1 + tail.len()) {
+            field.copy_from_slice(&tail);
+        }
+        Self { raw }
+    }
+}
+
+impl fmt::Debug for WaveformSettingsResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WaveformSettingsResponse")
+            .field("sender", &self.sender())
+            .field("color", &self.color())
             .finish()
     }
 }
