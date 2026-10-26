@@ -1331,8 +1331,18 @@ impl VirtualCdj {
                     // marked as the loaded one (F55). Only a track whose
                     // source player is *us* came off our medium.
                     Ok(status::Packet::CdjStatus(peer)) => {
-                        observe_loaded(&loaded, ours, &peer);
+                        let was_loaded = observe_loaded(&loaded, ours, &peer);
                         observe_peer_slots(&peers, &peer);
+                        if let Some((player, slot, track)) = was_loaded {
+                            // What the row marking (F55) runs on, and the only
+                            // evidence a load leaves in the journal.
+                            info!(
+                                player = %player,
+                                slot = ?slot,
+                                track = track,
+                                "a player loaded a track from us",
+                            );
+                        }
                         // rekordbox announces itself to a player whose status
                         // says the browser is open: byte 0x113 reads 0x05
                         // there and 0x07 on the idle home screen. Every
@@ -1612,14 +1622,30 @@ fn keep_alive_packet(
 /// Only a track whose source player is our own number came off our medium; a
 /// track a deck loaded from another player is not ours to mark, and marking by
 /// id alone would mark whichever of our tracks happened to share that id.
-fn observe_loaded(loaded: &LoadedTracks, ours: DeviceNumber, peer: &CdjStatus) {
+/// Record what a peer's status says it loaded from us, and return the load
+/// when the packet is the first to state it.
+///
+/// The return is `Some` only when the (player, slot, track) triple is new —
+/// status repeats the load in every packet while it holds, so the caller can
+/// log the load once instead of five times a second.
+fn observe_loaded(
+    loaded: &LoadedTracks,
+    ours: DeviceNumber,
+    peer: &CdjStatus,
+) -> Option<(DeviceNumber, Slot, u32)> {
     let Some(device) = peer.sender() else {
-        return;
+        return None;
     };
     if peer.source_player() != Some(ours) {
-        return;
+        return None;
     }
-    loaded.note(device.get(), peer.source_slot(), peer.track_id());
+    let slot = peer.source_slot();
+    let track = peer.track_id();
+    if loaded.track_on(device.get(), slot) == Some(track) {
+        return None;
+    }
+    loaded.note(device.get(), slot, track);
+    Some((device, slot, track))
 }
 
 /// Record what a peer's status packet says about its own two slots.
