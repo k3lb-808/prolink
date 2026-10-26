@@ -771,7 +771,8 @@ impl Session {
                         }
                     }
                     None => {
-                        warn!(track, "a cue write whose record did not parse");
+                        let bytes = message.blob(4).map(<[u8]>::len);
+                        warn!(track, bytes, "a cue write whose record did not parse");
                     }
                 }
                 push(out, &Message::success(transaction, kind, 0));
