@@ -42,6 +42,13 @@ long since re-evaluated by then.
 
 ## Verification
 
-584 lib tests pass, including the new `is_discoverable_for` cases. On-deck:
-restart, and the journal should show the startup announce with no F46
-warnings — the false alarms were the only symptom the old warnings had left.
+584 lib tests pass, including the new `is_discoverable_for` cases.
+
+**On the deck, 2026-10-26:** restart with the deck live. The journal shows
+the whole ground-truth chain: claim settled 08:21:15.8, the deck's source
+query answered within milliseconds, the push to both players, the startup
+announce at +0.9 s ("announced the source at startup peers=3"), the deck's
+media query 0.7 s after the announce, a boot-time `0x46` answered
+`color=Some(Rgb)`, and the dbserver connection. No F46 warnings anywhere.
+Also now confirmed: the deck asks `0x46` at **every** boot — the natural
+path carries the colour; the push is only for mid-session changes.
