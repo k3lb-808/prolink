@@ -121,6 +121,9 @@ impl StatusKind {
     /// by. rekordbox sends it three times right after answering a short
     /// source query, once per deck boot.
     pub const SOURCE_ANNOUNCE: Self = Self(0x16);
+    /// "I am watching source N" — a deck's report while it evaluates a
+    /// source: a burst of fourteen, 250 ms apart.
+    pub const SOURCE_MONITOR: Self = Self(0x80);
 
     /// A name for logs, or `None` for a kind we have never observed.
     pub fn name(self) -> Option<&'static str> {
@@ -138,6 +141,7 @@ impl StatusKind {
             Self::SOURCE_QUERY_SHORT => "source_query_short",
             Self::SOURCE_RESPONSE_SHORT => "source_response_short",
             Self::SOURCE_ANNOUNCE => "source_announce",
+            Self::SOURCE_MONITOR => "source_monitor",
             _ => return None,
         })
     }
@@ -211,6 +215,9 @@ pub enum Packet {
     SourceResponseShort(SourceResponseShort),
     /// "The rekordbox source is here."
     SourceAnnounce(SourceAnnounce),
+    /// "I am watching source N" — the deck's report while it evaluates a
+    /// source.
+    SourceMonitor(SourceMonitor),
     /// A well-formed datagram of a kind this crate does not model, including
     /// mixer status.
     Other {
@@ -237,6 +244,7 @@ impl Packet {
             Self::SourceQueryShort(_) => StatusKind::SOURCE_QUERY_SHORT,
             Self::SourceResponseShort(_) => StatusKind::SOURCE_RESPONSE_SHORT,
             Self::SourceAnnounce(_) => StatusKind::SOURCE_ANNOUNCE,
+            Self::SourceMonitor(_) => StatusKind::SOURCE_MONITOR,
             Self::Other { kind, .. } => *kind,
         }
     }
@@ -296,6 +304,9 @@ pub fn decode(data: &[u8]) -> Result<Packet> {
         }
         StatusKind::SOURCE_ANNOUNCE => {
             SourceAnnounce::parse(data).map_or_else(|_| other(), Packet::SourceAnnounce)
+        }
+        StatusKind::SOURCE_MONITOR => {
+            SourceMonitor::parse(data).map_or_else(|_| other(), Packet::SourceMonitor)
         }
         StatusKind::SOURCE_QUERY_SHORT => {
             SourceQueryShort::parse(data).map_or_else(|_| other(), Packet::SourceQueryShort)
@@ -1901,6 +1912,45 @@ impl fmt::Debug for SourceAnnounce {
     }
 }
 
+// -- source monitor report (0x80) -------------------------------------------
+
+/// "I am watching source N" — the deck's report while it evaluates a source.
+///
+/// A burst of fourteen, 250 ms apart (3.25 s in all), body
+/// `[00][01][source][zeros]`: the third body byte names the source's device
+/// number — `0x29` (41) against rekordbox and our server, `0x04` in the one
+/// capture where the server held device 4. The burst rides the evaluation
+/// window: the short source query, the announce batch and, in the RGB ground
+/// truth, the media query and the waveform settings ask all follow within
+/// half a second of the burst's packets. Nothing answers it — rekordbox never
+/// did (F64).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceMonitor {
+    /// The device reporting, from byte `0x21`. Player 1's stream in every
+    /// capture.
+    pub sender: DeviceNumber,
+    /// The source being monitored, from byte `0x26`.
+    pub source: DeviceNumber,
+}
+
+impl SourceMonitor {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x2c;
+
+    /// The body byte naming the source.
+    const OFF_SOURCE: usize = 0x26;
+
+    /// Parse one.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        check(data, StatusKind::SOURCE_MONITOR, Self::LEN)?;
+        let sender = DeviceNumber::new(byte_at(data, OFF_SENDER).unwrap_or(0))
+            .ok_or_else(|| Error::malformed(OFF_SENDER, "source monitor from device 0"))?;
+        let source = DeviceNumber::new(byte_at(data, Self::OFF_SOURCE).unwrap_or(0))
+            .ok_or_else(|| Error::malformed(Self::OFF_SOURCE, "source monitor names device 0"))?;
+        Ok(Self { sender, source })
+    }
+}
+
 // -- source description (0x10 / 0x11, 0x30 / 0x31) --------------------------
 
 /// "Describe yourself as a source" — the deck retries this about five times a
@@ -2633,6 +2683,27 @@ mod tests {
                 _ => panic!("the answers differ beyond the colour byte"),
             };
         }
+    }
+
+    #[test]
+    fn a_source_monitor_names_its_source() {
+        // The deck's report while evaluating us: fourteen of these, 250 ms
+        // apart, body `00 01 29 00...` — source 41. The one capture where the
+        // server held device 4 says 0x04 in the same byte.
+        let raw: Vec<u8> = [
+            0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x80, 0x58, 0x44, 0x4a,
+            0x2d, 0x41, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x08, 0x00, 0x01, 0x29, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ]
+        .to_vec();
+        let parsed = SourceMonitor::parse(&raw).unwrap();
+        assert_eq!(parsed.sender, device(1));
+        assert_eq!(parsed.source, device(0x29));
+        let mut theirs = raw.clone();
+        theirs[0x26] = 0x04;
+        assert_eq!(SourceMonitor::parse(&theirs).unwrap().source, device(4));
+        assert!(matches!(decode(&raw), Ok(Packet::SourceMonitor(_))));
     }
 
     #[test]

@@ -298,7 +298,24 @@ fn status_problems(raw: &[u8], source: Option<Ipv4Addr>) -> Vec<String> {
                 ));
             }
         }
-        status::Packet::SettingsQuery(_)
+        status::Packet::SourceMonitor(report) => {
+            // The body names the source the deck is monitoring, at 0x26.
+            if Some(report.source.get()) != raw.get(0x26).copied() {
+                problems.push(format!(
+                    "source_monitor: names source {:?} but byte 0x26 is {:?}",
+                    report.source,
+                    raw.get(0x26)
+                ));
+            }
+        }
+        status::Packet::SourceQuery(_)
+        | status::Packet::SourceResponse(_)
+        | status::Packet::SourceQueryShort(_)
+        | status::Packet::SourceResponseShort(_)
+        | status::Packet::SourceAnnounce(_)
+        | status::Packet::WaveformSettingsQuery(_)
+        | status::Packet::WaveformSettingsResponse(_)
+        | status::Packet::SettingsQuery(_)
         | status::Packet::SettingsResponse(_)
         | status::Packet::Other { .. } => {}
     }

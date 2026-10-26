@@ -1291,6 +1291,9 @@ impl VirtualCdj {
                 std::collections::HashMap::new();
             // Players the unasked waveform push has already reached.
             let mut pushed: std::collections::HashSet<u8> = std::collections::HashSet::new();
+            // The last source-monitor report: its source and when, so a burst
+            // logs once instead of fourteen times.
+            let mut monitoring: Option<(DeviceNumber, Instant)> = None;
             loop {
                 let (len, from) = match socket.recv_from(&mut buffer).await {
                     Ok(received) => received,
@@ -1388,6 +1391,25 @@ impl VirtualCdj {
                     Ok(status::Packet::MediaQuery(query)) => {
                         answer_media_query(query, ours, name, media.as_ref())
                             .map(|reply| (reply, query.requester_ip))
+                    }
+                    Ok(status::Packet::SourceMonitor(report)) => {
+                        // The deck is evaluating a source: a burst of fourteen
+                        // reports, 250 ms apart, naming the source's number.
+                        // One line per burst is signal; fourteen is noise.
+                        let now = Instant::now();
+                        let fresh = monitoring.map_or(true, |(last, at)| {
+                            report.source != last
+                                || now.saturating_duration_since(at) >= Duration::from_secs(5)
+                        });
+                        if fresh {
+                            info!(
+                                sender = %report.sender,
+                                source = %report.source,
+                                "the deck is monitoring a source",
+                            );
+                        }
+                        monitoring = Some((report.source, now));
+                        None
                     }
                     Ok(status::Packet::SourceQuery(query)) => {
                         let response = status::SourceResponse::build(name, ours);
