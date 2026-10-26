@@ -28,6 +28,7 @@ use prolink::{
     BeatInBar, BrowsableDeviceNumber, DeviceKind, DeviceName, DeviceNumber, Discovery, Interface,
     Monitor, PeerSlot, PlayerState, Slot, VirtualCdj, discovery::SCAN_DURATION,
 };
+use prolink_proto::status::WaveformColor;
 use tracing_subscriber::EnvFilter;
 
 /// Browse and serve Pioneer Pro DJ Link media.
@@ -228,6 +229,17 @@ enum Command {
         /// anything but 111 no real player will ever find us.
         #[arg(long, default_value_t = 111)]
         portmap_port: u16,
+
+        /// The waveform colour the settings answer names. What a deck renders
+        /// once it asks for the settings; the deck mostly never asks.
+        #[arg(long, default_value = "3band", value_parser = waveform_color)]
+        waveform_color: WaveformColor,
+
+        /// Push the waveform settings to players unasked. An experiment: real
+        /// rekordbox answers `0x46` and sends nothing until asked, so this is
+        /// the only way the colour could reach a deck that never asks.
+        #[arg(long)]
+        push_waveform_color: bool,
     },
 
     /// Read a rekordbox `export.pdb` and list what is on it.
@@ -281,6 +293,17 @@ fn device_kind(text: &str) -> Result<DeviceKind, String> {
         "cdj" => Ok(DeviceKind::CDJ),
         "rekordbox" => Ok(DeviceKind::REKORDBOX_OR_CDJ3000),
         _ => Err(format!("{text} is not a device kind; try cdj or rekordbox")),
+    }
+}
+
+fn waveform_color(text: &str) -> Result<WaveformColor, String> {
+    match text {
+        "blue" => Ok(WaveformColor::Blue),
+        "rgb" => Ok(WaveformColor::Rgb),
+        "3band" => Ok(WaveformColor::ThreeBand),
+        _ => Err(format!(
+            "{text} is not a waveform colour; try blue, rgb or 3band"
+        )),
     }
 }
 
@@ -397,6 +420,8 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
             kind,
             generation,
             portmap_port,
+            waveform_color,
+            push_waveform_color,
         } => {
             let interface = choose_interface(cli.interface.as_deref())?;
             serve(
@@ -408,6 +433,8 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
                 kind,
                 generation,
                 portmap_port,
+                waveform_color,
+                push_waveform_color,
             )
             .await
         }
@@ -570,6 +597,8 @@ async fn serve(
     kind: DeviceKind,
     generation: u8,
     portmap_port: u16,
+    waveform_color: WaveformColor,
+    push_waveform_color: bool,
 ) -> Result<(), BoxedError> {
     let mut media = Vec::new();
     // A rekordbox-class source serves its collection in the rekordbox slot:
@@ -609,6 +638,8 @@ async fn serve(
         kind,
         generation,
         portmap_port,
+        waveform_color,
+        push_waveform_color,
         ..VirtualPlayerConfig::new(interface)
     };
     let server = VirtualPlayer::start(config, media).await?;
@@ -621,6 +652,15 @@ async fn serve(
         ports.mount,
         ports.nfs,
         server.dbserver_port(),
+    );
+    let colour = match waveform_color {
+        WaveformColor::Blue => "blue",
+        WaveformColor::Rgb => "rgb",
+        WaveformColor::ThreeBand => "3band",
+    };
+    println!(
+        "waveform colour {colour} · unasked push {}",
+        if push_waveform_color { "on" } else { "off" },
     );
     if server.is_discoverable() {
         println!("press LINK on a CDJ; we should be listed as a source");

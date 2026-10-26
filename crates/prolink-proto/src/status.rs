@@ -300,8 +300,9 @@ pub fn decode(data: &[u8]) -> Result<Packet> {
         StatusKind::SOURCE_QUERY_SHORT => {
             SourceQueryShort::parse(data).map_or_else(|_| other(), Packet::SourceQueryShort)
         }
-        StatusKind::SOURCE_RESPONSE_SHORT => SourceResponseShort::parse(data)
-            .map_or_else(|_| other(), Packet::SourceResponseShort),
+        StatusKind::SOURCE_RESPONSE_SHORT => {
+            SourceResponseShort::parse(data).map_or_else(|_| other(), Packet::SourceResponseShort)
+        }
         _ => other(),
     })
 }
@@ -585,6 +586,14 @@ impl CdjStatus {
     const OFF_BEAT_IN_BAR: usize = 0xa6;
     const OFF_PACKET_COUNTER: usize = 0xc8;
 
+    /// The colour byte of the settings block a status echoes, at `0xda`.
+    ///
+    /// A player's own status carries a settings block — the same
+    /// `0x12345678` block the `0x47` answer carries — and the byte that picks
+    /// the waveform colour there says what the deck itself uses (F46). The
+    /// template's was captured from a deck whose source served 3Band.
+    const OFF_SETTINGS_COLOR: usize = 0xda;
+
     /// The pitch fader, four times over.
     ///
     /// A deck writes the same value to all four while it is playing, and zeroes
@@ -857,6 +866,7 @@ pub struct CdjStatusBuilder {
     beat_number: Option<u32>,
     beat_in_bar: Option<BeatInBar>,
     loaded_track: Option<LoadedTrack>,
+    waveform_color: WaveformColor,
 }
 
 /// What a deck is playing, and whose medium it came from.
@@ -902,6 +912,7 @@ impl Default for CdjStatusBuilder {
             beat_number: None,
             beat_in_bar: None,
             loaded_track: None,
+            waveform_color: WaveformColor::ThreeBand,
         }
     }
 }
@@ -952,6 +963,16 @@ impl CdjStatusBuilder {
     #[must_use]
     pub fn firmware(mut self, firmware: &str) -> Self {
         firmware.clone_into(&mut self.firmware);
+        self
+    }
+
+    /// The waveform colour the status's settings block echoes.
+    ///
+    /// A real deck states the colour it renders in its own status; the
+    /// template's byte is 3Band because the deck it came from drew 3Band.
+    #[must_use]
+    pub fn waveform_color(mut self, color: WaveformColor) -> Self {
+        self.waveform_color = color;
         self
     }
 
@@ -1187,6 +1208,11 @@ impl CdjStatusBuilder {
             put(&mut raw, CdjStatus::OFF_FIRMWARE + index, byte);
         }
         put_u32(&mut raw, CdjStatus::OFF_PACKET_COUNTER, self.packet_counter);
+        put(
+            &mut raw,
+            CdjStatus::OFF_SETTINGS_COLOR,
+            self.waveform_color.byte(),
+        );
         self.write_transport(&mut raw);
         CdjStatus { raw }
     }
@@ -1687,6 +1713,44 @@ impl fmt::Debug for SettingsResponse {
 
 // -- waveform settings (0x46 / 0x47) ---------------------------------------
 
+/// The waveform colour a source's settings name.
+///
+/// Three ground-truth captures of real rekordbox that differed only in the
+/// waveform display preference differ in exactly one byte — the settings
+/// block of the `0x47` answer (F46) — and the dbserver's waveform payloads
+/// are byte-identical across the three. Blue renders from the same data
+/// 3Band does: the byte is a rendering instruction, not a data format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveformColor {
+    /// The classic monochrome blue waveform.
+    Blue,
+    /// The three-colour waveform rekordbox calls RGB.
+    Rgb,
+    /// Low / mid / high, three coloured lines.
+    ThreeBand,
+}
+
+impl WaveformColor {
+    /// The settings-block byte that names this colour.
+    pub const fn byte(self) -> u8 {
+        match self {
+            Self::Blue => 0x01,
+            Self::Rgb => 0x03,
+            Self::ThreeBand => 0x04,
+        }
+    }
+
+    /// The colour a settings-block byte names.
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0x01 => Some(Self::Blue),
+            0x03 => Some(Self::Rgb),
+            0x04 => Some(Self::ThreeBand),
+            _ => None,
+        }
+    }
+}
+
 /// "Describe the waveform settings you serve" — a query a deck sends once,
 /// when the link comes up.
 ///
@@ -1720,8 +1784,8 @@ impl WaveformSettingsQuery {
 /// The body opens with the tag id the deck itself uses for waveform-preview
 /// work (`0x2904`), then the settings magic [`SettingsResponse::MAGIC`] — the
 /// same `0x12345678` that leads `PIONEER/MYSETTING.DAT` — then the settings
-/// block whose one varying byte is the waveform colour: `0x01` blue, `0x03`
-/// RGB, `0x04` 3Band.
+/// block whose one varying byte is the waveform colour
+/// ([`WaveformColor`]).
 #[derive(Clone, PartialEq, Eq)]
 pub struct WaveformSettingsResponse {
     raw: Vec<u8>,
@@ -1734,13 +1798,6 @@ impl WaveformSettingsResponse {
     /// The byte of the settings block that picks the waveform colour.
     pub const OFF_COLOR: usize = 0x32;
 
-    /// Blue waveforms.
-    pub const COLOR_BLUE: u8 = 0x01;
-    /// RGB (three-colour) waveforms.
-    pub const COLOR_RGB: u8 = 0x03;
-    /// 3Band (low / mid / high) waveforms.
-    pub const COLOR_THREE_BAND: u8 = 0x04;
-
     /// Parse a waveform settings response.
     pub fn parse(data: &[u8]) -> Result<Self> {
         check(data, StatusKind::WF_SETTINGS_RESPONSE, Self::LEN)?;
@@ -1750,15 +1807,20 @@ impl WaveformSettingsResponse {
     header_accessors!();
 
     /// The waveform colour the answer carries.
-    pub fn color(&self) -> Option<u8> {
-        byte_at(&self.raw, Self::OFF_COLOR)
+    pub fn color(&self) -> Option<WaveformColor> {
+        byte_at(&self.raw, Self::OFF_COLOR).and_then(WaveformColor::from_byte)
     }
 
     /// Build the answer with waveform colour `color`, everything else verbatim
     /// from the ground truth.
-    pub fn build(name: DeviceName, sender: DeviceNumber, color: u8) -> Self {
+    pub fn build(name: DeviceName, sender: DeviceNumber, color: WaveformColor) -> Self {
         let mut raw = vec![0u8; Self::LEN];
-        write_header(&mut raw, StatusKind::WF_SETTINGS_RESPONSE, name, sender.get());
+        write_header(
+            &mut raw,
+            StatusKind::WF_SETTINGS_RESPONSE,
+            name,
+            sender.get(),
+        );
         if let Some(slot) = raw.get_mut(OFF_SUBTYPE) {
             *slot = 0x01;
         }
@@ -1772,7 +1834,7 @@ impl WaveformSettingsResponse {
             field.copy_from_slice(&body);
         }
         if let Some(slot) = raw.get_mut(Self::OFF_COLOR) {
-            *slot = color;
+            *slot = color.byte();
         }
         let tail: [u8; 3] = [0x01, 0x02, 0x01];
         if let Some(field) = raw.get_mut(Self::OFF_COLOR + 1..Self::OFF_COLOR + 1 + tail.len()) {
@@ -2512,6 +2574,84 @@ mod tests {
         assert_eq!(parsed.sender(), Some(device(0x29)));
         assert_eq!(parsed.subtype(), 0x01);
         assert_eq!(parsed.name(), DeviceName::new("rekordbox"));
+    }
+
+    #[test]
+    fn a_waveform_settings_answer_matches_the_ground_truth_byte_for_byte() {
+        // rekordbox's answer with the 3Band preference: 72 bytes, the settings
+        // block `01 01 04 01 02 01` inline. The three colour ground truths
+        // differ from each other in exactly the byte this names.
+        let answer = WaveformSettingsResponse::build(
+            DeviceName::new("rekordbox"),
+            device(0x29),
+            WaveformColor::ThreeBand,
+        );
+        let expected: Vec<u8> = [
+            0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x47, 0x72, 0x65, 0x6b,
+            0x6f, 0x72, 0x64, 0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x01, 0x29, 0x00, 0x24, 0x29, 0x04, 0x00, 0x00, 0x12, 0x34,
+            0x56, 0x78, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x04, 0x01, 0x02, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ]
+        .to_vec();
+        assert_eq!(answer.as_bytes(), &expected[..]);
+        let parsed = WaveformSettingsResponse::parse(&expected).unwrap();
+        assert_eq!(parsed.color(), Some(WaveformColor::ThreeBand));
+        assert_eq!(parsed.sender(), Some(device(0x29)));
+        assert_eq!(parsed.subtype(), 0x01);
+    }
+
+    #[test]
+    fn the_waveform_colour_is_one_byte_of_the_answer_and_nothing_else() {
+        let mut others = None;
+        for (color, byte) in [
+            (WaveformColor::Blue, 0x01),
+            (WaveformColor::Rgb, 0x03),
+            (WaveformColor::ThreeBand, 0x04),
+        ] {
+            let built = WaveformSettingsResponse::build(DeviceName::default(), device(4), color);
+            let raw = built.as_bytes();
+            assert_eq!(raw.len(), WaveformSettingsResponse::LEN);
+            assert_eq!(raw[WaveformSettingsResponse::OFF_COLOR], byte);
+            assert_eq!(
+                WaveformColor::from_byte(byte),
+                Some(color),
+                "the byte round-trips"
+            );
+            // The three colour ground truths differ in exactly this byte, so
+            // everything else must be identical between the answers.
+            let rest: Vec<u8> = raw
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != WaveformSettingsResponse::OFF_COLOR)
+                .map(|(_, byte)| *byte)
+                .collect();
+            others = match others {
+                None => Some(rest),
+                Some(same) if same == rest => Some(same),
+                _ => panic!("the answers differ beyond the colour byte"),
+            };
+        }
+    }
+
+    #[test]
+    fn a_status_echoes_the_waveform_colour_it_was_given() {
+        // A player's own status carries the settings block, colour byte at
+        // 0xda; the template's byte was captured from a deck drawing 3Band.
+        let built = CdjStatus::builder()
+            .device_number(device(1))
+            .waveform_color(WaveformColor::Rgb)
+            .build();
+        assert_eq!(
+            built.as_bytes()[CdjStatus::OFF_SETTINGS_COLOR],
+            WaveformColor::Rgb.byte()
+        );
+        let plain = CdjStatus::builder().device_number(device(1)).build();
+        assert_eq!(
+            plain.as_bytes()[CdjStatus::OFF_SETTINGS_COLOR],
+            WaveformColor::ThreeBand.byte()
+        );
     }
 
     #[test]

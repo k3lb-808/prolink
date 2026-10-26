@@ -70,7 +70,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use prolink_proto::djl::{self, Body};
-use prolink_proto::status::{self, CdjStatus, MediaState};
+use prolink_proto::status::{self, CdjStatus, MediaState, WaveformColor};
 use prolink_proto::{
     BEAT_PORT, BrowsableDeviceNumber, DISCOVERY_PORT, DeviceKind, DeviceName, DeviceNumber,
     STATUS_PORT, Slot,
@@ -189,6 +189,17 @@ pub struct VirtualCdjConfig {
     /// being browsable at all. Off means we are visible but have nothing to
     /// offer.
     pub emit_status: bool,
+    /// The waveform colour the settings answer names, and what our own status
+    /// block echoes.
+    pub waveform_color: WaveformColor,
+    /// Whether to push the waveform settings to players unasked.
+    ///
+    /// An experiment: a real rekordbox answers `0x46` and sends nothing until
+    /// asked, and the AZ mostly never asks, so the colour it draws is whatever
+    /// it defaults to. This unicasts the `0x47` answer to every player heard
+    /// from, once, in the shape of a reply — if the deck accepts it, the
+    /// configured colour takes effect without a fresh boot on its side.
+    pub push_waveform_color: bool,
 }
 
 impl Default for VirtualCdjConfig {
@@ -200,6 +211,8 @@ impl Default for VirtualCdjConfig {
             generation: 0x00,
             firmware: "1.44".to_owned(),
             emit_status: true,
+            waveform_color: WaveformColor::ThreeBand,
+            push_waveform_color: false,
         }
     }
 }
@@ -573,7 +586,8 @@ impl VirtualCdj {
         cdj.tasks.push(cdj.spawn_defender(discovery));
         cdj.tasks.push(cdj.spawn_step_aside(discovery));
         if let Some(socket) = cdj.status_socket.clone() {
-            cdj.tasks.push(cdj.spawn_status(discovery, Arc::clone(&socket))?);
+            cdj.tasks
+                .push(cdj.spawn_status(discovery, Arc::clone(&socket))?);
             cdj.tasks.push(cdj.spawn_query_responder(socket));
             // Beats ride with status, not with the keep-alive: a device that
             // does not publish what it is doing has no business claiming a
@@ -1071,7 +1085,11 @@ impl VirtualCdj {
         0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x09, 0xff, 0x00,
     ];
 
-    fn spawn_status(&self, discovery: &Discovery, shared: Arc<UdpSocket>) -> Result<JoinHandle<()>> {
+    fn spawn_status(
+        &self,
+        discovery: &Discovery,
+        shared: Arc<UdpSocket>,
+    ) -> Result<JoinHandle<()>> {
         // A real deck sends each status packet from a different, incrementing
         // source port. We do not imitate that; an ephemeral port is enough, and
         // the socket bound to 50002 is kept free to receive queries.
@@ -1120,10 +1138,7 @@ impl VirtualCdj {
                     let mut packet = Self::SOURCE_STATUS;
                     packet[11..31].copy_from_slice(&config.name.0);
                     packet[33] = number.load(Ordering::Relaxed);
-                    let to = SocketAddr::V4(SocketAddrV4::new(
-                        interface.broadcast(),
-                        STATUS_PORT,
-                    ));
+                    let to = SocketAddr::V4(SocketAddrV4::new(interface.broadcast(), STATUS_PORT));
                     if let Err(error) = shared.send_to(&packet, to).await {
                         debug!(%error, "source status broadcast failed");
                     }
@@ -1214,6 +1229,8 @@ impl VirtualCdj {
         let loaded = Arc::clone(&self.loaded);
         let peers = Arc::clone(&self.peers);
         let tap = self.status_tap.clone();
+        let waveform_color = self.config.waveform_color;
+        let push_waveform_color = self.config.push_waveform_color;
 
         tokio::spawn(async move {
             let mut buffer = vec![0u8; MAX_DATAGRAM];
@@ -1221,6 +1238,8 @@ impl VirtualCdj {
             // datagrams: the last ui byte seen and when it last fired.
             let mut browsing: std::collections::HashMap<u8, (u8, Instant)> =
                 std::collections::HashMap::new();
+            // Players the unasked waveform push has already reached.
+            let mut pushed: std::collections::HashSet<u8> = std::collections::HashSet::new();
             loop {
                 let (len, from) = match socket.recv_from(&mut buffer).await {
                     Ok(received) => received,
@@ -1267,7 +1286,27 @@ impl VirtualCdj {
                         // the deck's media query — and with it the listing —
                         // follows the announce, not the identity handshake.
                         let ui = datagram.get(0x113).copied().unwrap_or(0);
-                        let Some(player) = peer.sender() else { continue };
+                        let Some(player) = peer.sender() else {
+                            continue;
+                        };
+                        // The unasked waveform push: one `0x47` per player
+                        // heard from, shaped exactly like the answer to a
+                        // `0x46` (the deck's queries leave from ephemeral
+                        // ports and answers go to `:50002`, so the address is
+                        // the only thing that matters).
+                        if push_waveform_color && pushed.insert(player.get()) {
+                            let response =
+                                status::WaveformSettingsResponse::build(name, ours, waveform_color);
+                            let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
+                            match socket.send_to(response.as_bytes(), to).await {
+                                Ok(_) => {
+                                    info!(player = %player, "pushed the waveform settings unasked")
+                                }
+                                Err(error) => {
+                                    warn!(%error, "could not push the waveform settings")
+                                }
+                            }
+                        }
                         let now = Instant::now();
                         let entry = browsing.entry(player.get()).or_insert((0u8, now));
                         let fire = ui == 0x05
@@ -1329,15 +1368,12 @@ impl VirtualCdj {
                         None
                     }
                     Ok(status::Packet::WaveformSettingsQuery(query)) => {
-                        let response = status::WaveformSettingsResponse::build(
-                            name,
-                            ours,
-                            status::WaveformSettingsResponse::COLOR_THREE_BAND,
-                        );
+                        let response =
+                            status::WaveformSettingsResponse::build(name, ours, waveform_color);
                         info!(
                             sender = %query.sender,
                             bytes = response.as_bytes().len(),
-                            color = response.color().map(u32::from),
+                            color = ?response.color(),
                             "answered a waveform settings query",
                         );
                         Some((response.into_bytes(), *from.ip()))
@@ -1698,6 +1734,7 @@ fn status_packet(
     let state = |slot: Slot| media.slot_state(slot);
     let mut builder = CdjStatus::builder()
         .name(config.name)
+        .waveform_color(config.waveform_color)
         .slot_state(Slot::USB, state(Slot::USB))
         .slot_state(Slot::SD, state(Slot::SD))
         .link_available(!occupied.is_empty() || peers > 0)
@@ -2498,7 +2535,10 @@ mod tests {
             "the first one goes at once"
         );
         let last = Some((sent, master));
-        assert!(!status_due(last, ms(100), master, cadence), "nothing new: wait");
+        assert!(
+            !status_due(last, ms(100), master, cadence),
+            "nothing new: wait"
+        );
         assert!(!status_due(last, ms(199), master, cadence));
         assert!(
             status_due(last, ms(200), master, cadence),
