@@ -89,8 +89,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use prolink_proto::dbserver::{
-    self, Descriptor, Field, MAX_RENDER_BATCH, MenuItem, Message, MessageKind, PORT,
-    PORT_QUERY_PORT, PREAMBLE,
+    self, CueWriteRecord, Descriptor, Field, MAX_RENDER_BATCH, MenuItem, Message, MessageKind,
+    PORT, PORT_QUERY_PORT, PREAMBLE,
 };
 use prolink_proto::{BrowsableDeviceNumber, Slot};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -99,6 +99,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::interface::Interface;
+use crate::serve::cue_writes::CueWrites;
 use crate::serve::medium::{Medium, ServedSlot};
 use crate::serve::player::MediaSet;
 use crate::socket;
@@ -246,6 +247,9 @@ struct Shared {
     ///
     /// Resolved per *message* and never cached on a connection (F37).
     media: Arc<MediaSet>,
+    /// The cues the decks have written back to us (F65), overlaid onto the
+    /// analysis records at reply time.
+    cue_writes: CueWrites,
     /// When the server started, for the prefix word the beat grid and detail
     /// waveform carry — which must be non-zero and must not go backwards (F33).
     started: Instant,
@@ -313,6 +317,7 @@ impl DbServer {
             tags: TagLists::default(),
             loaded: Arc::clone(&loaded),
             media,
+            cue_writes: CueWrites::new(),
             started: Instant::now(),
         });
 
@@ -649,6 +654,11 @@ impl ResultSet {
 }
 
 impl Session {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the datagram dispatch reads as one flat match over the kinds it answers; \
+                  splitting it would scatter the protocol logic"
+    )]
     fn handle(&mut self, shared: &Shared, message: &Message, out: &mut Vec<u8>) -> Flow {
         let transaction = message.transaction_id;
         let kind = message.kind;
@@ -731,11 +741,43 @@ impl Session {
                 push(out, &Message::success(transaction, kind, 0));
                 return Flow::Continue;
             }
+            MessageKind::CUE_WRITE => {
+                // The deck's cue write (F65): third argument `1` sets a hot
+                // cue, `0` removes it, and the deck re-asserts each state
+                // about every 15 s while the track stays loaded — so the
+                // application is idempotent. The record rides in the blob
+                // verbatim. The reply is the bare acknowledgement the deck
+                // has been accepting all along.
+                let track = message.number(1).unwrap_or(0);
+                let set = message.number(2) == Some(1);
+                match message
+                    .blob(4)
+                    .and_then(|bytes| CueWriteRecord::parse(bytes).ok())
+                {
+                    Some(record) => {
+                        if let Some(medium) = shared.medium(slot) {
+                            let hot_cue = record.hot_cue();
+                            shared.cue_writes.apply(medium.root(), track, set, &record);
+                            info!(track, hot_cue, set, "a deck wrote a cue");
+                        }
+                    }
+                    None => {
+                        warn!(track, "a cue write whose record did not parse");
+                    }
+                }
+                push(out, &Message::success(transaction, kind, 0));
+                return Flow::Continue;
+            }
             _ => {}
         }
 
         if analysis::is_binary_request(kind)
-            && let Some(reply) = analysis::reply(message, medium, shared.started.elapsed())
+            && let Some(reply) = analysis::reply(
+                message,
+                medium,
+                shared.started.elapsed(),
+                &shared.cue_writes,
+            )
         {
             push(out, &reply);
             for message in analysis::push_bundle(medium, message.number(1).unwrap_or(0), kind) {

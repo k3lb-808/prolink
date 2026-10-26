@@ -776,6 +776,10 @@ impl MessageKind {
     pub const GET_WAVEFORM_DETAIL: Self = Self(0x2904);
     /// Extended cue points, CDJ-2000NXS2 and later.
     pub const GET_CUE_POINTS_EXT: Self = Self(0x2b04);
+
+    /// The deck's cue write: it persists a hot cue it set, or one it
+    /// deleted, straight into the source (F65).
+    pub const CUE_WRITE: Self = Self(0x2705);
     /// A raw analysis tag.
     pub const GET_ANALYSIS_TAG: Self = Self(0x2c04);
 
@@ -908,6 +912,7 @@ impl MessageKind {
             Self::MEDIA_INFO => "media_info",
             Self::GET_WAVEFORM_DETAIL => "get_waveform_detail",
             Self::GET_CUE_POINTS_EXT => "get_cue_points_ext",
+            Self::CUE_WRITE => "cue_write",
             Self::GET_ANALYSIS_TAG => "get_analysis_tag",
             Self::RENDER_MENU => "render_menu",
             Self::UNKNOWN_3100 => "unknown_3100",
@@ -1501,6 +1506,108 @@ impl fmt::Debug for Message {
 }
 
 // -- the cursor -----------------------------------------------------------
+
+// -- the deck's cue write (0x2705) ------------------------------------------
+
+/// One hot cue as the deck writes it back to the source (F65).
+///
+/// The record is 84 bytes, its own length in front: the hot-cue number
+/// (`0x04`, `1` = A), the cue type (`0x06`, `1` = a point, `2` = a loop),
+/// the standing `1000` the extended-cue records carry (`0x0a`), the position
+/// in milliseconds (`0x0c`) and the loop position (`0x10`,
+/// `0xffff_ffff` = none). The rest of the record is the deck's own tail —
+/// colour-ish bytes and padding whose meaning is not settled — and travels
+/// verbatim so nothing written is lost to a bad guess.
+///
+/// One live session (2026-10-26, track 260): setting a cue went out once
+/// with the request's third argument `1`; deleting one went out as six
+/// identical records of the cue's pre-delete state, ~15 s apart, third
+/// argument `0` — a periodic re-assertion, not a retry loop. So the
+/// argument is the operation: `1` sets, `0` removes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CueWriteRecord {
+    raw: Vec<u8>,
+}
+
+impl CueWriteRecord {
+    /// Bytes on the wire.
+    pub const LEN: usize = 0x54;
+
+    /// The hot-cue number byte, `1` = A.
+    const OFF_HOT_CUE: usize = 0x04;
+    /// The cue type byte: `1` a point, `2` a loop.
+    const OFF_TYPE: usize = 0x06;
+    /// The position, in milliseconds.
+    const OFF_TIME: usize = 0x0c;
+    /// The loop position; `0xffff_ffff` when it is not a loop.
+    const OFF_LOOP: usize = 0x10;
+
+    /// Parse a write record.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != Self::LEN {
+            return Err(Error::Truncated {
+                need: Self::LEN,
+                at: 0,
+                have: data.len(),
+            });
+        }
+        Ok(Self { raw: data.to_vec() })
+    }
+
+    /// The record verbatim, as the deck wrote it.
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// The hot-cue number, `1` = A.
+    pub fn hot_cue(&self) -> u16 {
+        u16::from_le_bytes([
+            self.raw.get(Self::OFF_HOT_CUE).copied().unwrap_or(0),
+            self.raw.get(Self::OFF_HOT_CUE + 1).copied().unwrap_or(0),
+        ])
+    }
+
+    /// The cue type: `1` a point, `2` a loop.
+    pub fn cue_type(&self) -> u16 {
+        u16::from_le_bytes([
+            self.raw.get(Self::OFF_TYPE).copied().unwrap_or(0),
+            self.raw.get(Self::OFF_TYPE + 1).copied().unwrap_or(0),
+        ])
+    }
+
+    /// The position, in milliseconds.
+    pub fn time_ms(&self) -> u32 {
+        u32::from_le_bytes(
+            self.raw
+                .get(Self::OFF_TIME..Self::OFF_TIME + 4)
+                .unwrap_or(&[0; 4])
+                .try_into()
+                .unwrap_or([0; 4]),
+        )
+    }
+
+    /// The loop position; `0xffff_ffff` when it is not a loop.
+    pub fn loop_ms(&self) -> u32 {
+        u32::from_le_bytes(
+            self.raw
+                .get(Self::OFF_LOOP..Self::OFF_LOOP + 4)
+                .unwrap_or(&[0; 4])
+                .try_into()
+                .unwrap_or([0; 4]),
+        )
+    }
+}
+
+impl fmt::Debug for CueWriteRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CueWriteRecord")
+            .field("hot_cue", &self.hot_cue())
+            .field("cue_type", &self.cue_type())
+            .field("time_ms", &self.time_ms())
+            .field("loop_ms", &self.loop_ms())
+            .finish()
+    }
+}
 
 /// A bounds-checked forward cursor whose short reads are [`Error::Truncated`].
 ///
@@ -2591,6 +2698,48 @@ mod tests {
 
     fn browsable(number: u8) -> BrowsableDeviceNumber {
         BrowsableDeviceNumber::new(number).expect("a browsable device number")
+    }
+
+    /// The two cue-write records of the live session (F65): the deck's echo
+    /// of the cue as it was (frame 220, removed) and the set (frame 2110).
+    fn cue_write_hex() -> (Vec<u8>, Vec<u8>) {
+        (
+            hex(concat!(
+                "54000000010001000000e803dc000000",
+                "ffffffff000000000000000000000000",
+                "00000000ffffffffffffffffffffffff",
+                "ffffffff1a0000000000000000000000",
+                "000000000000000000000400000000ff",
+                "00000000"
+            )),
+            hex(concat!(
+                "54000000010001000000e8033e080000",
+                "ffffffff000000000000000000000000",
+                "00000000ffffffffffffffffffffffff",
+                "ffffffff1a0000000000000000000000",
+                "000000000000000000000400000000ff",
+                "00170000"
+            )),
+        )
+    }
+
+    #[test]
+    fn a_cue_write_record_names_its_cue() {
+        let (removed, set) = cue_write_hex();
+        let removed = CueWriteRecord::parse(&removed).expect("the pre-delete echo");
+        assert_eq!(removed.hot_cue(), 1, "hot cue A");
+        assert_eq!(removed.cue_type(), 1, "a point, not a loop");
+        assert_eq!(removed.time_ms(), 220);
+        assert_eq!(removed.loop_ms(), u32::MAX, "not a loop");
+        let set = CueWriteRecord::parse(&set).expect("the set");
+        assert_eq!(set.hot_cue(), 1);
+        assert_eq!(set.cue_type(), 1);
+        assert_eq!(set.time_ms(), 2110);
+        assert_eq!(set.loop_ms(), u32::MAX);
+        // Everything the record carries beyond the decoded fields travels
+        // verbatim, so nothing written is lost to a bad guess.
+        assert_eq!(removed.raw().len(), CueWriteRecord::LEN);
+        assert_ne!(removed.raw(), set.raw(), "the two live writes differ");
     }
 
     // -- captured messages ------------------------------------------------

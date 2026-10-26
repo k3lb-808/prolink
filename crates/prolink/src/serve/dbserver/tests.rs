@@ -21,7 +21,11 @@
 //! menus have real content: 329 artists of which 290 are referenced, 24 Camelot
 //! keys, seven history playlists and a 40-track playlist.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
+
+use super::analysis::{apply_extended_overlay, apply_memory_overlay};
+use crate::serve::cue_writes::TrackOverlay;
 
 use prolink_proto::dbserver::{
     Arguments, Descriptor, Drill, FILTER_ALL, Field, ItemType, METADATA_ITEMS, MediaInfo,
@@ -437,6 +441,7 @@ fn shared(media: impl IntoIterator<Item = Arc<Medium>>) -> Shared {
         loaded: Arc::new(LoadedTracks::default()),
         device: BrowsableDeviceNumber::new(2).expect("device 2 is browsable"),
         media: Arc::new(MediaSet::new(media)),
+        cue_writes: CueWrites::new(),
         started: Instant::now(),
     }
 }
@@ -2758,4 +2763,115 @@ fn a_medium_is_not_a_phantom_until_it_is_told_it_is() {
     assert!(!medium.is_phantom());
     medium.go_phantom();
     assert!(medium.is_phantom());
+}
+
+// -- the deck's cue writes (F65) --------------------------------------------
+
+/// The live session's set record (F65), with the position swapped for the
+/// test's. The byte tail beyond the decoded fields travels as captured.
+fn cue_write_record(time_ms: u32) -> CueWriteRecord {
+    const SET: &str = concat!(
+        "54000000010001000000e8033e080000",
+        "ffffffff000000000000000000000000",
+        "00000000ffffffffffffffffffffffff",
+        "ffffffff1a0000000000000000000000",
+        "000000000000000000000400000000ff",
+        "00170000"
+    );
+    let mut raw = hex_bytes(SET);
+    raw[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
+    CueWriteRecord::parse(&raw).expect("the set record")
+}
+
+/// Decode a hex literal; the test is the thing that fails on bad hex.
+fn hex_bytes(text: &str) -> Vec<u8> {
+    (0..text.len() / 2)
+        .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).expect("valid hex"))
+        .collect()
+}
+
+#[test]
+fn a_cue_write_sidecar_replays_whole() {
+    let dir = std::env::temp_dir().join(format!(
+        "prolink-cue-sidecar-{}-{:?}",
+        std::process::id(),
+        Duration::from_secs(u64::from(std::process::id()))
+    ));
+    std::fs::create_dir_all(&dir).expect("a temp root");
+    let writes = CueWrites::new();
+    let set = cue_write_record(2110);
+    writes.apply(Some(&dir), 260, true, &set);
+    // A fresh store must replay the sidecar to the same overlay.
+    let replayed = CueWrites::new();
+    let overlay = replayed.overlay_for(Some(&dir), 260);
+    assert_eq!(
+        overlay.upserts.get(&1).map(CueWriteRecord::time_ms),
+        Some(2110)
+    );
+    assert!(!overlay.removed.contains(&1), "a set undoes a removal");
+    // And a removal after it lands as a removal.
+    writes.apply(Some(&dir), 260, false, &set);
+    let replayed = CueWrites::new();
+    let overlay = replayed.overlay_for(Some(&dir), 260);
+    assert!(overlay.upserts.is_empty());
+    assert!(overlay.removed.contains(&1));
+    drop(replayed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_deck_written_cues_overlay_the_analysis_records() {
+    // The extended list as the analysis files carry it: hot cue A at 220
+    // with its colour, B at 95220.
+    let mut extended = vec![
+        (
+            1u32,
+            1u8,
+            220u32,
+            u32::MAX,
+            "intro".to_owned(),
+            0x2a,
+            0xff,
+            0,
+            0,
+        ),
+        (2, 1, 95220, u32::MAX, String::new(), 0, 0, 0, 0),
+    ];
+    let mut overlay = TrackOverlay::default();
+    overlay.upserts.insert(1, cue_write_record(2110));
+    overlay.removed.insert(2);
+    apply_extended_overlay(&mut extended, &overlay);
+    // A was replaced in place (frame updated, comment and colour kept) and
+    // B, removed, is gone.
+    assert_eq!(extended.len(), 1);
+    assert_eq!(extended[0].0, 1);
+    assert_eq!(extended[0].2, 2110);
+    assert_eq!(extended[0].4, "intro");
+    assert_eq!((extended[0].5, extended[0].6), (0x2a, 0xff));
+    // A brand-new hot cue lands with its position and no colour of ours.
+    let mut overlay = TrackOverlay::default();
+    overlay.upserts.insert(5, cue_write_record(60000));
+    apply_extended_overlay(&mut extended, &overlay);
+    let fresh = extended.last().expect("the new cue appended");
+    assert_eq!((fresh.0, fresh.2), (5, 60000));
+    assert_eq!((fresh.5, fresh.6, fresh.7, fresh.8), (0, 0, 0, 0));
+    // The same overlay on the memory-point list.
+    let mut memory = vec![prolink_proto::analysis::Cue {
+        order: 0x100,
+        hot_cue: 1,
+        time_ms: 220,
+        loop_time_ms: u32::MAX,
+    }];
+    overlay.upserts.clear();
+    overlay.upserts.insert(1, cue_write_record(2110));
+    apply_memory_overlay(&mut memory, &overlay);
+    assert_eq!(memory.len(), 1);
+    assert_eq!(memory[0].time_ms, 2110, "the base record's order is kept");
+    assert_eq!(memory[0].order, 0x100);
+    let removal = TrackOverlay {
+        upserts: BTreeMap::new(),
+        removed: [1].into(),
+    };
+    apply_memory_overlay(&mut memory, &removal);
+    assert!(memory.is_empty(), "a removed hot cue leaves the list");
 }

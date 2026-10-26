@@ -38,6 +38,7 @@ use prolink_proto::dbserver::{Arguments, Field, MediaInfo, MenuItem, Message, Me
 use prolink_rekordbox::FourCc;
 
 use crate::serve::Medium;
+use crate::serve::cue_writes::{CueWrites, TrackOverlay};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The blob of a whole tag chunk, with the byte length typed in front: what
@@ -171,6 +172,7 @@ pub(super) fn reply(
     message: &Message,
     medium: Option<&Medium>,
     uptime: Duration,
+    cue_writes: &CueWrites,
 ) -> Option<Message> {
     let kind = message.kind;
     let transaction = message.transaction_id;
@@ -188,7 +190,7 @@ pub(super) fn reply(
         return Message::binary_reply(transaction, MessageKind::ARTWORK, kind, image, &[]);
     }
     if kind == MessageKind::GET_CUE_POINTS {
-        return Some(cue_points(transaction, medium, track_id));
+        return Some(cue_points(transaction, medium, track_id, cue_writes));
     }
     if kind == MessageKind::GET_MEDIA_INFO {
         return Some(media_info(transaction, medium));
@@ -204,7 +206,7 @@ pub(super) fn reply(
         return Message::binary_reply(transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1]);
     }
     if kind == MessageKind::GET_CUE_POINTS_EXT {
-        return cue_points_ext(transaction, medium, track_id);
+        return cue_points_ext(transaction, medium, track_id, cue_writes);
     }
 
     if let Some(medium) = medium
@@ -273,6 +275,39 @@ pub(super) fn reply(
     Message::binary_reply(transaction, response, kind, payload, trailing)
 }
 
+/// Overlay a track's deck-written cues onto its extended-cue list: a removed
+/// hot cue's record is dropped; a set one replaces its base record, keeping
+/// the comment and colour the base carried, or lands as a new record with an
+/// empty comment and the deck's colour bytes when there was none.
+pub(super) fn apply_extended_overlay(
+    all: &mut Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8)>,
+    overlay: &TrackOverlay,
+) {
+    all.retain(|(pad, ..)| {
+        u16::try_from(*pad)
+            .ok()
+            .is_none_or(|hot_cue| !overlay.removed.contains(&hot_cue))
+    });
+    for (hot_cue, record) in &overlay.upserts {
+        let pad = u32::from(*hot_cue);
+        let ty = u8::try_from(record.cue_type()).unwrap_or(1);
+        let time_ms = record.time_ms();
+        let loop_ms = record.loop_ms();
+        match all.iter_mut().find(|entry| entry.0 == pad) {
+            Some(entry) => {
+                entry.2 = time_ms;
+                entry.3 = loop_ms;
+            }
+            None => {
+                // The write record's own colour tail is the one part of it
+                // nobody has decoded; a brand-new cue lands uncoloured until
+                // that read is settled (F65).
+                all.push((pad, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0));
+            }
+        }
+    }
+}
+
 /// The extended-cue-points reply: one 136-byte record per cue.
 ///
 /// Ground-truth-derived (`82950a7`, from a real deck's answer): "LAST KNOWN
@@ -289,8 +324,15 @@ pub(super) fn reply(
           fixed-size buffer and the truncated wire fields never see a value that fits \
           nowhere"
 )]
-fn cue_points_ext(transaction: u32, medium: Option<&Medium>, track_id: u32) -> Option<Message> {
-    let all = extended(medium, track_id);
+fn cue_points_ext(
+    transaction: u32,
+    medium: Option<&Medium>,
+    track_id: u32,
+    cue_writes: &CueWrites,
+) -> Option<Message> {
+    let mut all = extended(medium, track_id);
+    let overlay = cue_writes.overlay_for(medium.and_then(Medium::root), track_id);
+    apply_extended_overlay(&mut all, &overlay);
     let count = all.len() as u32;
     let mut payload = Vec::with_capacity(all.len() * 136);
     for (hot_cue, ty, time_ms, loop_ms, comment, cix, r, g, b) in all {
@@ -505,8 +547,16 @@ fn entry_width(medium: &Medium, track_id: u32) -> u32 {
 /// `[request type, 0, record bytes, records, record size, count, 0, time bytes,
 /// times]` — fixed-size cue records, then one `(time, loop time)` pair each.
 /// Cues go out sorted by time, not in the order the file stores them.
-fn cue_points(transaction: u32, medium: Option<&Medium>, track_id: u32) -> Message {
-    let blobs = analysis::cue_points(&cues(medium, track_id));
+fn cue_points(
+    transaction: u32,
+    medium: Option<&Medium>,
+    track_id: u32,
+    cue_writes: &CueWrites,
+) -> Message {
+    let overlay = cue_writes.overlay_for(medium.and_then(Medium::root), track_id);
+    let mut list = cues(medium, track_id);
+    apply_memory_overlay(&mut list, &overlay);
+    let blobs = analysis::cue_points(&list);
     let record_bytes = u32::try_from(blobs.records.len()).unwrap_or(u32::MAX);
     let time_bytes = u32::try_from(blobs.times.len()).unwrap_or(u32::MAX);
     let entry_size = u32::try_from(analysis::CUE_ENTRY_LEN).unwrap_or(u32::MAX);
@@ -525,6 +575,29 @@ fn cue_points(transaction: u32, medium: Option<&Medium>, track_id: u32) -> Messa
             Field::Blob(blobs.times),
         ]),
     )
+}
+
+/// Overlay a track's deck-written cues onto its memory-point list: drops for
+/// the removed hot cues, and for the set ones a replacement that keeps the
+/// base record's ordering field or mints the observed pattern for a new one.
+pub(super) fn apply_memory_overlay(list: &mut Vec<Cue>, overlay: &TrackOverlay) {
+    list.retain(|cue| !overlay.removed.contains(&cue.hot_cue));
+    for (hot_cue, record) in &overlay.upserts {
+        let ty = u8::try_from(record.cue_type()).unwrap_or(1);
+        let fresh = Cue {
+            order: u16::from(ty).saturating_mul(0x100),
+            hot_cue: *hot_cue,
+            time_ms: record.time_ms(),
+            loop_time_ms: record.loop_ms(),
+        };
+        match list.iter_mut().find(|cue| &cue.hot_cue == hot_cue) {
+            Some(cue) => {
+                cue.time_ms = fresh.time_ms;
+                cue.loop_time_ms = fresh.loop_time_ms;
+            }
+            None => list.push(fresh),
+        }
+    }
 }
 
 /// A track's memory points and hot cues, from both `PCOB` lists.

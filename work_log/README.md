@@ -54,6 +54,7 @@ Status key: `todo` · `wip` · `done` · `blocked` · `dropped`
 | 40 | The deck's `0x80` decoded (source-monitor report, body names the source; corpus target fixed) and the ephemeral-`0x16` question dissolved | done | [040](040-source-monitor.md); F64 |
 | 41 | Player 2: symmetric by audit, confirmed by a hands-on session; loads now logged. Cue write-back: no ground truth anywhere, evidence-blocked | done / blocked on evidence | [041](041-player-2-and-cue-write-back.md) |
 | 42 | Behaviour tests: the announce trigger and the short-source answer extracted and tested; claim gating already covered | done | [042](042-behaviour-tests.md) |
+| 43 | Cue write-back: `0x2705` decoded from the live capture, the sidecar overlay store, both cue replies overlaid | done, on-deck verify open | [043](043-cue-write-back.md); F65 |
 
 ## Acceptance: what the CLI must be able to do
 

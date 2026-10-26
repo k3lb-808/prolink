@@ -8,6 +8,7 @@
 //! the order. This module is steps 4 through 7: the read-only tree, the ONC RPC
 //! servers over it, and the dbserver that makes it browsable.
 
+pub mod cue_writes;
 pub mod dbserver;
 pub mod folder;
 pub mod medium;
