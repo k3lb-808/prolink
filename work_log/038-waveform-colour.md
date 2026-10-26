@@ -65,7 +65,26 @@ in.
 ## Verification state
 
 Golden test: the 3Band answer matches the ground-truth `0x47` byte for byte.
-Unit tests: per-colour byte, no other byte differs, the status echo. **Not yet
-verified on the deck**: deploy with `--waveform-color blue` and either wait
-for a boot-time `0x46` or run with `--push-waveform-color`, then look at the
-deck.
+Unit tests: per-colour byte, no other byte differs, the status echo.
+
+**Verified on the deck, 2026-10-26:**
+
+- With `--waveform-color blue`, the deck asked `0x46` during boot evaluation
+  (08:01:39, 0.2 s after the media query) and drew non-3Band waveforms — the
+  byte takes effect through the natural path (F63's once-per-session ask).
+- With `--waveform-color rgb --push-waveform-color`, a plain restart of the
+  server (no deck reboot): the deck did **not** re-ask, and the unasked push
+  reached both players 9 s after our claims — and **the deck accepted it**:
+  the rendering changed to the deck's RGB look. So F63's open question is
+  answered: a deck takes an unasked `0x47`, and the colour can be changed
+  live. (Whether a production server *should* push — rekordbox never does —
+  is a taste decision; off by default.)
+- The RGB look itself: "mostly red in both windows". The data is not at
+  fault — our served three-band detail is band-balanced (dominance 46/42/42
+  vs ground truth's 44/35/34) and every preference-dependent carrier was
+  re-checked byte-wise: the analysis-tag replies (PWV4/PWV5 colour data) are
+  md5-identical across all three ground-truth preferences. The RGB rendering
+  semantics are entirely deck-side, and the ground-truth sessions left no
+  visual reference of what real rekordbox's RGB looked like on this deck.
+  So: the byte is correct end-to-end; whether the deck's RGB look is
+  *wanted* is the operator's eye, not a protocol question.
