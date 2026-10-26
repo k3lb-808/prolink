@@ -750,30 +750,29 @@ impl Session {
                 // has been accepting all along.
                 let track = message.number(1).unwrap_or(0);
                 let set = message.number(2) == Some(1);
-                match message
+                if let Some(record) = message
                     .blob(4)
                     .and_then(|bytes| CueWriteRecord::parse(bytes).ok())
                 {
-                    Some(record) => {
-                        if let Some(medium) = shared.medium(slot) {
-                            let hot_cue = record.hot_cue();
-                            shared.cue_writes.apply(medium.root(), track, set, &record);
-                            // The raw bytes ride in the journal, so a write
-                            // whose shape nobody has decoded — a memory cue,
-                            // say — can be read off the log alone.
-                            info!(
-                                track,
-                                hot_cue,
-                                set,
-                                record = hex_encode(record.raw()),
-                                "a deck wrote a cue",
-                            );
-                        }
+                    if let Some(medium) = shared.medium(slot) {
+                        let hot_cue = record.hot_cue();
+                        shared.cue_writes.apply(medium.root(), track, set, &record);
+                        // The raw bytes ride in the journal, so a write
+                        // whose shape nobody has decoded — a memory cue,
+                        // say — can be read off the log alone.
+                        info!(
+                            track,
+                            hot_cue,
+                            set,
+                            record = hex_encode(record.raw()),
+                            "a deck wrote a cue",
+                        );
                     }
-                    None => {
-                        let bytes = message.blob(4).map(<[u8]>::len);
-                        warn!(track, bytes, "a cue write whose record did not parse");
-                    }
+                } else if message.blob(4).is_some() {
+                    let bytes = message.blob(4).map(<[u8]>::len);
+                    warn!(track, bytes, "a cue write whose record did not parse");
+                } else {
+                    warn!(track, "a cue write with no record");
                 }
                 push(out, &Message::success(transaction, kind, 0));
                 return Flow::Continue;
