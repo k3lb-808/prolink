@@ -1511,14 +1511,13 @@ impl fmt::Debug for Message {
 
 /// One cue as the deck writes it back to the source (F65).
 ///
-/// The record is its own length in front, 84 bytes for the hot-cue write
-/// the live capture held: the hot-cue number (`0x04`, `1` = A, `0` = a
-/// memory cue), the cue type (`0x06`, `1` = a point, `2` = a loop), the
-/// standing `1000` the extended-cue records carry (`0x0a`), the position
-/// in milliseconds (`0x0c`) and the loop position (`0x10`,
-/// `0xffff_ffff` = none). Longer records exist — a memory cue's write came
-/// through longer, presumably carrying its label — and the whole record
-/// travels verbatim so nothing written is lost to a bad guess.
+/// The record is its own length in front, 84 bytes for a hot cue, 76 for a
+/// memory cue (the hot-cue record's last eight bytes — its colour tail —
+/// dropped): the hot-cue number (`0x04`, `1` = A, `0` = a memory cue), the
+/// cue type (`0x06`, `1` = a point, `2` = a loop), the standing `1000`
+/// (`0x0a`), the position in milliseconds (`0x0c`) and the loop position
+/// (`0x10`, `0xffff_ffff` = none). The whole record travels verbatim so
+/// nothing written is lost to a bad guess.
 ///
 /// One live session (2026-10-26, track 260): setting a cue went out once
 /// with the request's third argument `1`; deleting one went out as six
@@ -1531,8 +1530,11 @@ pub struct CueWriteRecord {
 }
 
 impl CueWriteRecord {
-    /// Bytes on the wire.
+    /// Bytes on the wire for a hot cue; a memory cue writes eight fewer.
     pub const LEN: usize = 0x54;
+
+    /// The shortest record the live session carried: a memory cue's.
+    pub const MIN_LEN: usize = 0x4c;
 
     /// The hot-cue number byte, `1` = A.
     const OFF_HOT_CUE: usize = 0x04;
@@ -1543,9 +1545,10 @@ impl CueWriteRecord {
     /// The loop position; `0xffff_ffff` when it is not a loop.
     const OFF_LOOP: usize = 0x10;
 
-    /// Parse a write record: the 84-byte base at least, any tail verbatim.
+    /// Parse a write record: the shortest observed shape at least, any tail
+    /// verbatim.
     pub fn parse(data: &[u8]) -> Result<Self> {
-        if data.len() < Self::LEN {
+        if data.len() < Self::MIN_LEN {
             return Err(Error::Truncated {
                 need: Self::LEN,
                 at: 0,
@@ -2744,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn a_memory_cue_write_may_travel_longer_and_is_carried_verbatim() {
+    fn a_memory_cue_write_travels_shorter_and_is_carried_verbatim() {
         // The memory-cue writes of the live session arrived longer than the
         // 84-byte hot-cue record — presumably carrying the label — and the
         // parse must take them whole rather than truncate.
@@ -2755,8 +2758,8 @@ mod tests {
         assert_eq!(parsed.hot_cue(), 1);
         assert_eq!(parsed.time_ms(), 220);
         assert_eq!(parsed.raw(), &long, "the tail travels verbatim");
-        // And a short record still does not parse.
-        assert!(CueWriteRecord::parse(&removed[..CueWriteRecord::LEN - 1]).is_err());
+        // And shorter than a memory cue still does not parse.
+        assert!(CueWriteRecord::parse(&removed[..CueWriteRecord::MIN_LEN - 1]).is_err());
     }
 
     // -- captured messages ------------------------------------------------
