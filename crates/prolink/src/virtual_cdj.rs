@@ -137,6 +137,17 @@ const STATUS_FLOOR: Duration = Duration::from_millis(62);
 /// anyway, so the announce is fidelity, not the listing gate.
 const ANNOUNCE_AT_STARTUP: Duration = Duration::from_millis(800);
 
+/// Byte `0x113` of a player's status while its browser is open; `0x07` is the
+/// idle home screen.
+const BROWSER_OPEN: u8 = 0x05;
+
+/// How long an open browser goes between source announces.
+///
+/// The deck re-evaluates a source it has listed — the `0x30` retry loop, the
+/// `0x80` bursts — so an announce every few seconds keeps a stale claim from
+/// outliving our presence. Five seconds matches the deck's own retry period.
+const ANNOUNCE_RETRY: Duration = Duration::from_secs(5);
+
 /// Keep-alive byte `0x25` when this device was first onto the network.
 ///
 /// Held while no other device says it. A deck holding it keeps it as peers
@@ -1191,7 +1202,12 @@ impl VirtualCdj {
     /// rides an announce batch, and the media query follows it within 0.2 s.
     /// The responder's browser-open trigger covers peers heard after this.
     fn spawn_startup_announce(&self, discovery: &Discovery) -> JoinHandle<()> {
-        let socket = Arc::clone(self.status_socket.as_ref().expect("status is on"));
+        // start() only spawns this when the status socket is on; a `None`
+        // here would be a bug above, and a task with nothing to send through
+        // is the honest outcome either way.
+        let Some(socket) = self.status_socket.as_ref().map(Arc::clone) else {
+            return tokio::spawn(async {});
+        };
         let name = self.config.name;
         let number = Arc::clone(&self.number);
         let table = PeerAddresses::new(discovery);
@@ -1343,12 +1359,8 @@ impl VirtualCdj {
                                 "a player loaded a track from us",
                             );
                         }
-                        // rekordbox announces itself to a player whose status
-                        // says the browser is open: byte 0x113 reads 0x05
-                        // there and 0x07 on the idle home screen. Every
-                        // ground-truth announce batch rides such a moment, so
-                        // the deck's media query — and with it the listing —
-                        // follows the announce, not the identity handshake.
+                        // rekordbox announces itself to a player whose
+                        // browser is open — see [`announce_due`].
                         let ui = datagram.get(0x113).copied().unwrap_or(0);
                         let Some(player) = peer.sender() else {
                             continue;
@@ -1364,21 +1376,14 @@ impl VirtualCdj {
                             let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
                             match socket.send_to(response.as_bytes(), to).await {
                                 Ok(_) => {
-                                    info!(player = %player, "pushed the waveform settings unasked")
+                                    info!(player = %player, "pushed the waveform settings unasked");
                                 }
                                 Err(error) => {
-                                    warn!(%error, "could not push the waveform settings")
+                                    warn!(%error, "could not push the waveform settings");
                                 }
                             }
                         }
-                        let now = Instant::now();
-                        let entry = browsing.entry(player.get()).or_insert((0u8, now));
-                        let fire = ui == 0x05
-                            && (entry.0 != ui
-                                || now.saturating_duration_since(entry.1)
-                                    >= Duration::from_secs(5));
-                        *entry = (ui, now);
-                        if fire {
+                        if announce_due(&mut browsing, player.get(), ui, Instant::now()) {
                             let announce = status::SourceAnnounce::build(name, ours);
                             let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
                             for _ in 0..3 {
@@ -1407,7 +1412,7 @@ impl VirtualCdj {
                         // reports, 250 ms apart, naming the source's number.
                         // One line per burst is signal; fourteen is noise.
                         let now = Instant::now();
-                        let fresh = monitoring.map_or(true, |(last, at)| {
+                        let fresh = monitoring.is_none_or(|(last, at)| {
                             report.source != last
                                 || now.saturating_duration_since(at) >= Duration::from_secs(5)
                         });
@@ -1427,25 +1432,17 @@ impl VirtualCdj {
                         Some((response.into_bytes(), *from.ip()))
                     }
                     Ok(status::Packet::SourceQueryShort(query)) => {
-                        // The deck asks this every five seconds until it is
-                        // answered. The two ground-truth exchanges agree on
-                        // the ingredients and disagree on the order: a booting
-                        // deck is satisfied by three fast source announces and
-                        // never sees a short response, a running deck retries
-                        // until the short response arrives. Send both, every
-                        // time — the announces first, as the boot capture has
-                        // them, then the short response.
-                        let announce = status::SourceAnnounce::build(name, ours);
-                        let response = status::SourceResponseShort::build(name, ours);
                         let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
-                        for _ in 0..3 {
-                            if let Err(error) = socket.send_to(announce.as_bytes(), to).await {
-                                warn!(%error, "could not announce the source");
+                        // The announces first, as the boot capture has them,
+                        // then the short response — see
+                        // [`short_source_answers`].
+                        for (index, answer) in short_source_answers(name, ours).iter().enumerate() {
+                            if index > 0 {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
                             }
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                        if let Err(error) = socket.send_to(response.as_bytes(), to).await {
-                            warn!(%error, "could not answer the short source query");
+                            if let Err(error) = socket.send_to(answer, to).await {
+                                warn!(%error, "could not answer the short source query");
+                            }
                         }
                         info!(sender = %query.sender, "answered the short source query with announces");
                         None
@@ -1622,6 +1619,42 @@ fn keep_alive_packet(
 /// Only a track whose source player is our own number came off our medium; a
 /// track a deck loaded from another player is not ours to mark, and marking by
 /// id alone would mark whichever of our tracks happened to share that id.
+/// Whether a player's browser state earns a source announce.
+///
+/// rekordbox announces itself to a player whose status says the browser is
+/// open: byte `0x113` reads `0x05` there and `0x07` on the idle home screen.
+/// Every ground-truth announce batch rides such a moment, so the deck's
+/// media query — and with it the listing — follows the announce, not the
+/// identity handshake. The rule: fire on the edge into `0x05`, and again at
+/// most every [`ANNOUNCE_RETRY`] while the browser stays open; a player
+/// without a browser never fires.
+fn announce_due(
+    browsing: &mut std::collections::HashMap<u8, (u8, Instant)>,
+    player: u8,
+    ui: u8,
+    now: Instant,
+) -> bool {
+    let entry = browsing.entry(player).or_insert((0, now));
+    let fire = ui == BROWSER_OPEN
+        && (entry.0 != ui || now.saturating_duration_since(entry.1) >= ANNOUNCE_RETRY);
+    *entry = (ui, now);
+    fire
+}
+
+/// The answer to a short source query: three announces, then the short
+/// response, in that order.
+///
+/// The two ground-truth exchanges agree on the ingredients and disagree on
+/// the order: a booting deck is satisfied by three fast source announces and
+/// never sees a short response, a running deck retries until the short
+/// response arrives. Send both, every time — the announces first, as the
+/// boot capture has them, then the short response.
+fn short_source_answers(name: DeviceName, ours: DeviceNumber) -> Vec<Vec<u8>> {
+    let announce = status::SourceAnnounce::build(name, ours).into_bytes();
+    let response = status::SourceResponseShort::build(name, ours).into_bytes();
+    vec![announce.clone(), announce.clone(), announce, response]
+}
+
 /// Record what a peer's status says it loaded from us, and return the load
 /// when the packet is the first to state it.
 ///
@@ -1633,9 +1666,7 @@ fn observe_loaded(
     ours: DeviceNumber,
     peer: &CdjStatus,
 ) -> Option<(DeviceNumber, Slot, u32)> {
-    let Some(device) = peer.sender() else {
-        return None;
-    };
+    let device = peer.sender()?;
     if peer.source_player() != Some(ours) {
         return None;
     }
@@ -2217,6 +2248,78 @@ mod tests {
         let peer = CdjStatus::parse(&raw).expect("a status packet");
         observe_loaded(&loaded, ours, &peer);
         assert_eq!(loaded.track_on(2, Slot::USB), Some(99));
+    }
+
+    /// The announce trigger's state machine, exercised the way the responder
+    /// sees it: idle screen, browser opens, the announce fires; a repeat does
+    /// not; leaving and re-entering the browser fires again; a browser held
+    /// open re-fires after [`ANNOUNCE_RETRY`].
+    #[test]
+    fn the_browser_open_announce_fires_on_the_edge_and_again_after_the_retry() {
+        let mut browsing = std::collections::HashMap::new();
+        let t0 = Instant::now();
+        // The idle home screen earns nothing, and does not disturb the state.
+        assert!(!announce_due(&mut browsing, 1, 0x07, t0));
+        // The browser opening is the edge that fires.
+        assert!(announce_due(&mut browsing, 1, BROWSER_OPEN, t0));
+        // A browser held open does not re-fire inside the retry window.
+        assert!(!announce_due(
+            &mut browsing,
+            1,
+            BROWSER_OPEN,
+            t0 + Duration::from_millis(500)
+        ));
+        // Closing it earns nothing, and re-opening it is a fresh edge.
+        assert!(!announce_due(
+            &mut browsing,
+            1,
+            0x07,
+            t0 + Duration::from_millis(600)
+        ));
+        assert!(announce_due(
+            &mut browsing,
+            1,
+            BROWSER_OPEN,
+            t0 + Duration::from_millis(700)
+        ));
+        // Held open past the retry window — counted from the last edge — it
+        // re-fires.
+        assert!(announce_due(
+            &mut browsing,
+            1,
+            BROWSER_OPEN,
+            t0 + Duration::from_millis(700) + ANNOUNCE_RETRY + Duration::from_millis(100)
+        ));
+        // And a second player has its own state entirely.
+        assert!(announce_due(&mut browsing, 2, BROWSER_OPEN, t0));
+    }
+
+    /// The short source query's answer: three identical announces and then
+    /// the short response, in the boot capture's order.
+    #[test]
+    fn the_short_source_answer_is_three_announces_then_the_response() {
+        let name = DeviceName::new("palme");
+        let ours = DeviceNumber::new(0x29).expect("41 is a device number");
+        let answers = short_source_answers(name, ours);
+        assert_eq!(answers.len(), 4);
+        let kind_at = |answer: &[u8]| answer[prolink_proto::MAGIC.len()];
+        assert_eq!(kind_at(&answers[0]), status::StatusKind::SOURCE_ANNOUNCE.0);
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(answers[1], answers[2]);
+        assert_eq!(
+            kind_at(&answers[3]),
+            status::StatusKind::SOURCE_RESPONSE_SHORT.0
+        );
+        // Both shapes carry our identity.
+        for answer in &answers {
+            let decoded = status::decode(answer).expect("a datagram we built");
+            let sender = match &decoded {
+                status::Packet::SourceAnnounce(announce) => announce.sender(),
+                status::Packet::SourceResponseShort(response) => response.sender(),
+                other => panic!("the wrong shape came back: {other:?}"),
+            };
+            assert_eq!(sender, Some(ours));
+        }
     }
 
     use super::*;
