@@ -1303,6 +1303,12 @@ impl VirtualCdj {
             // The last source-monitor report: its source and when, so a burst
             // logs once instead of fourteen times.
             let mut monitoring: Option<(DeviceNumber, Instant)> = None;
+            // Each player's status byte 0x87, so a move logs once. The byte
+            // is per-player steady (0x02 for player 1, 0x03 for player 2 in
+            // every capture) and drops to 0x01 on both streams while a burst
+            // of source-monitor reports runs; its full meaning is unmapped
+            // (work log 040).
+            let mut modes: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
             loop {
                 let (len, from) = match socket.recv_from(&mut buffer).await {
                     Ok(received) => received,
@@ -1351,6 +1357,21 @@ impl VirtualCdj {
                                 track = track,
                                 "a player loaded a track from us",
                             );
+                        }
+                        if let Some(player) = peer.sender() {
+                            let mode = datagram.get(0x87).copied().unwrap_or(0);
+                            // `insert` hands back the previous value.
+                            match modes.insert(player.get(), mode) {
+                                Some(old) if old != mode => {
+                                    debug!(
+                                        player = %player,
+                                        from = old,
+                                        to = mode,
+                                        "the deck's player state byte moved",
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                         // rekordbox announces itself to a player whose
                         // browser is open — see [`announce_due`].

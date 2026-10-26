@@ -51,3 +51,25 @@ rare `0x01` blips. It does not track the browser-open byte at `0x113` (both
 `0x05` and `0x07` screens carry the same values), nor the waveform
 preference. Per-player state, meaning still open; documented in
 PROTOCOL.md rather than guessed at.
+
+Second pass (`tools/capture-analysis/decode_0x87.py`), no new captures:
+
+- **The blips are evaluation transients.** In `az_wire_new`, both streams
+  drop to `0x01` for 0.3-0.9 s and restore — and the drop coincides with a
+  burst of fourteen source-monitor reports (first packet 40 ms before, then
+  one every 250 ms), with our heartbeat unbroken. So the byte resets while
+  the deck re-evaluates a source and is restored per player after.
+- **The steady values are per-player constants**: `0x02` (player 1) and
+  `0x03` (player 2) in five of six captures with a burst at the start;
+  the 3Band ground truth alone holds `0x04` for player 2 the whole capture.
+  Ruled out against it: the deck's claimed device numbers (identical across
+  the three colour captures), load state, play state, the UI byte, the
+  waveform preference.
+- The **1152-byte status variant** is the 292-byte layout plus a
+  low-band tail (67 non-zero bytes in `az-cue`, no ASCII or UTF-16 strings);
+  the same-moment sender-1/sender-2 diff shows per-player regions (a
+  `01`-marked bitfield at `0xd9..` where player 1 has marks, per-player
+  tempo fields at `0x92`/`0x96`) — player-side state, not shared.
+- Our responder now logs each `0x87` move at debug ("the deck's player
+  state byte moved"), so the next capture session can correlate transitions
+  with deck-side actions directly in the journal.
