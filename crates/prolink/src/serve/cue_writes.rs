@@ -178,7 +178,7 @@ fn hex_decode(text: &str) -> Option<Vec<u8>> {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         let value = u32::from(*byte);

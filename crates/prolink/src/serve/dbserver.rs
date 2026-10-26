@@ -99,7 +99,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::interface::Interface;
-use crate::serve::cue_writes::CueWrites;
+use crate::serve::cue_writes::{CueWrites, hex_encode};
 use crate::serve::medium::{Medium, ServedSlot};
 use crate::serve::player::MediaSet;
 use crate::socket;
@@ -758,7 +758,16 @@ impl Session {
                         if let Some(medium) = shared.medium(slot) {
                             let hot_cue = record.hot_cue();
                             shared.cue_writes.apply(medium.root(), track, set, &record);
-                            info!(track, hot_cue, set, "a deck wrote a cue");
+                            // The raw bytes ride in the journal, so a write
+                            // whose shape nobody has decoded — a memory cue,
+                            // say — can be read off the log alone.
+                            info!(
+                                track,
+                                hot_cue,
+                                set,
+                                record = hex_encode(record.raw()),
+                                "a deck wrote a cue",
+                            );
                         }
                     }
                     None => {
@@ -797,6 +806,7 @@ impl Session {
             self.remember(kind, raw, count, items);
             push(out, &Message::success(transaction, kind, count));
         } else {
+            debug!(kind = ?kind, track = message.number(1).unwrap_or(0), "a request answered with the bare acknowledgement");
             // Not a menu, and not a request this module understands. A bare
             // acknowledgement, never an error: `0x3100` is answered exactly
             // this way by a real deck, `0x3d03` likewise by inference, and F25
