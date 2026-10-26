@@ -665,9 +665,22 @@ async fn serve(
     if server.is_discoverable() {
         println!("press LINK on a CDJ; we should be listed as a source");
     } else {
+        // Where the generation probes differs: 111 for old players (F46),
+        // 50111 for the AZ's rekordbox-class sources.
+        let (probed, advice) = if kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+            (
+                50111,
+                "50111 is unprivileged, so this should not happen — another \
+                 process may hold the port",
+            )
+        } else {
+            (
+                111,
+                "run as root, or on Linux set net.ipv4.ip_unprivileged_port_start=111",
+            )
+        };
         println!(
-            "WARNING: the portmapper is not on 111, so no real player will find us. \
-             Run as root, or on Linux set net.ipv4.ip_unprivileged_port_start=111."
+            "WARNING: the portmapper is not on {probed}, so no real player will find us. {advice}."
         );
     }
     println!("ctrl-c to stop");

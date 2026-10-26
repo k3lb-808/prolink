@@ -362,6 +362,10 @@ pub struct VirtualPlayer {
     discovery: Discovery,
     media: Arc<MediaSet>,
     vfs: Arc<RwLock<Vfs>>,
+    /// What we claim to be, kept only so "can a real player find us" is asked
+    /// generation-aware: the old one probes the portmapper on 111, the AZ's
+    /// sources on 50111.
+    kind: DeviceKind,
 }
 
 impl VirtualPlayer {
@@ -392,11 +396,12 @@ impl VirtualPlayer {
             },
         )
         .await?;
-        if !nfs.ports().is_discoverable() {
+        if !nfs.ports().is_discoverable_for(config.kind) {
             warn!(
                 portmap = nfs.ports().portmap,
-                "the portmapper is not on 111; a real player will retry GETPORT for ever and \
-                 never find us"
+                kind = ?config.kind,
+                "the portmapper is not where this generation probes; a real player will retry \
+                 GETPORT for ever and never find us"
             );
         }
 
@@ -458,6 +463,7 @@ impl VirtualPlayer {
             discovery,
             media,
             vfs,
+            kind: config.kind,
         })
     }
 
@@ -695,12 +701,13 @@ impl VirtualPlayer {
         self.dbserver.port()
     }
 
-    /// Whether a real player can find us at all.
+    /// Whether a real player of our claimed kind can find us at all.
     ///
-    /// False means the portmapper is not on UDP/111, and no amount of correct
-    /// behaviour afterwards will be reached.
+    /// False means the portmapper is not where the generation probes — 111 for
+    /// the old one (F46), 50111 for the AZ's rekordbox-class sources — and no
+    /// amount of correct behaviour afterwards will be reached.
     pub fn is_discoverable(&self) -> bool {
-        self.nfs.ports().is_discoverable()
+        self.nfs.ports().is_discoverable_for(self.kind)
     }
 
     /// The media being served.

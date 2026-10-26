@@ -33,9 +33,11 @@
 //! elevation at all.
 //!
 //! Asking for a portmapper anywhere else — which is what a `portmap_port` other
-//! than 111 means — is allowed, because it is how the fallback question was
-//! settled experimentally, and it warns at startup. [`Ports::is_discoverable`]
-//! is what a caller should check before believing it is browsable.
+//! than 111 means — is allowed: it is how the fallback question was settled
+//! experimentally, and how the AZ generation is served at all, since its decks
+//! probe 50111 there. [`Ports::is_discoverable_for`] is what a caller should
+//! check before believing it is browsable; it knows which port the generation
+//! looks on.
 //!
 //! All three binds are **exclusive**. Everywhere else in this crate a port is
 //! shared, because a DJ will have rekordbox open and both of us only listen;
@@ -85,6 +87,7 @@ mod answer;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
+use prolink_proto::DeviceKind;
 use prolink_proto::rpc::{mount, nfs2, portmap};
 use tokio::net::UdpSocket;
 use tokio::sync::Semaphore;
@@ -138,7 +141,8 @@ const ALREADY_HELD: &str = "another RPC server already holds it — on Linux tha
 /// Where the three servers are answering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Ports {
-    /// The portmapper. 111, or a player will never look (F46).
+    /// The portmapper. 111 for the old generation, 50111 for the AZ's
+    /// rekordbox-class sources.
     pub portmap: u16,
     /// mountd. 48276 when it was free.
     pub mount: u16,
@@ -147,13 +151,27 @@ pub struct Ports {
 }
 
 impl Ports {
-    /// Whether real hardware can find these.
+    /// Whether the old generation can find these.
     ///
-    /// False means the portmapper is not on 111, and a deck will retry
+    /// False means the portmapper is not on 111, and an old deck will retry
     /// `GETPORT` for ever rather than fall back to the well-known ports (F46) —
-    /// so everything else here is bound, correct and unreachable.
+    /// so everything else here is bound, correct and unreachable. The AZ
+    /// generation is different: see [`Self::is_discoverable_for`].
     pub fn is_discoverable(&self) -> bool {
         self.portmap == portmap::PORT
+    }
+
+    /// Whether `kind`'s generation can find these.
+    ///
+    /// An old-generation player only looks on 111 (F46). The AZ generation
+    /// probes a rekordbox-class source's portmapper on 50111 — where it listed
+    /// us through the whole serving effort, privilege-free.
+    pub fn is_discoverable_for(&self, kind: DeviceKind) -> bool {
+        if kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+            self.portmap == portmap::AZ_PORT
+        } else {
+            self.portmap == portmap::PORT
+        }
     }
 }
 
@@ -226,19 +244,19 @@ impl NfsServer {
             mount: mount_port,
             nfs: nfs_port,
         };
-        if ports.is_discoverable() {
-            info!(
+        info!(
+            portmap = ports.portmap,
+            mount = ports.mount,
+            nfs = ports.nfs,
+            "serving files",
+        );
+        if ports.portmap != portmap::PORT {
+            // Whether that is a problem depends on the generation: an old
+            // player only looks on 111, the AZ probes 50111. The callers know
+            // the kind and warn kind-aware; here the fact is all we can state.
+            debug!(
                 portmap = ports.portmap,
-                mount = ports.mount,
-                nfs = ports.nfs,
-                "serving files",
-            );
-        } else {
-            warn!(
-                portmap = ports.portmap,
-                "the portmapper is not on {}: a player will retry GETPORT indefinitely, never \
-                 fall back to the well-known ports, and never list us (F46)",
-                portmap::PORT,
+                "the portmapper is not on the old generation's 111 (F46)"
             );
         }
 
@@ -688,14 +706,23 @@ mod tests {
         assert_eq!(config.portmap_port, 111);
         assert_eq!(config.mount_port, 48276);
         assert_eq!(config.nfs_port, 2049);
-        assert!(
-            Ports {
-                portmap: 111,
-                mount: 48276,
-                nfs: 2049,
-            }
-            .is_discoverable()
-        );
+        let on_111 = Ports {
+            portmap: 111,
+            mount: 48276,
+            nfs: 2049,
+        };
+        assert!(on_111.is_discoverable());
+        // The generations look on different ports: the old one on 111 (F46),
+        // the AZ's rekordbox-class sources on 50111.
+        assert!(on_111.is_discoverable_for(DeviceKind::CDJ));
+        assert!(!on_111.is_discoverable_for(DeviceKind::REKORDBOX_OR_CDJ3000));
+        let on_50111 = Ports {
+            portmap: portmap::AZ_PORT,
+            mount: 48276,
+            nfs: 2049,
+        };
+        assert!(on_50111.is_discoverable_for(DeviceKind::REKORDBOX_OR_CDJ3000));
+        assert!(!on_50111.is_discoverable_for(DeviceKind::CDJ));
     }
 
     #[tokio::test]

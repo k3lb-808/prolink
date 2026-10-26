@@ -55,8 +55,19 @@ pub const PROGRAM: Program = Program::PORTMAP;
 /// The only version anything here speaks.
 pub const VERSION: u32 = 2;
 
-/// The well-known port. **Binding this is mandatory to be browsable** (F46).
+/// The well-known port. **Binding this is mandatory for the old generation to
+/// be browsable** (F46): a CDJ-2000-era deck retries `GETPORT` here for ever
+/// rather than fall back to the well-known mountd and nfsd ports.
 pub const PORT: u16 = 111;
+
+/// Where the AZ generation probes a rekordbox-class source's portmapper.
+///
+/// The XDJ-AZ does not stop at 111: it asks here and lists the source, so
+/// this is where a rekordbox-class server's portmapper lives in practice —
+/// which also keeps it unprivileged. 907b94f moved ours here and the listing
+/// came up; the old-generation `GETPORT`-for-ever behaviour is a property of
+/// the old decks, not of RPC.
+pub const AZ_PORT: u16 = 50111;
 
 /// Cap on a `DUMP` listing, so a malformed reply cannot loop or allocate
 /// without bound. A CDJ registers three programs; a general-purpose host a few
