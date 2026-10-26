@@ -52,6 +52,7 @@ Status key: `todo` · `wip` · `done` · `blocked` · `dropped`
 | 38 | The waveform colour: pinned to the `0x47` answer's one settings byte, `--waveform-color`, and an unasked push as an experiment | done, verified on the deck | [038](038-waveform-colour.md); F59–F63: the TCP waveform data is identical across preferences, `0x29` is not the channel, the deck asks `0x46` about once per session — and takes an unasked answer live |
 | 39 | Kind-aware discovery (the AZ probes the portmapper on 50111; the 111 warnings were false alarms) and the startup announce ~0.8 s after our start | done, verified on the deck | [039](039-kind-aware-discovery-and-startup-announce.md); the media query followed the startup announce 0.7 s later, and the deck asks `0x46` at every boot |
 | 40 | The deck's `0x80` decoded (source-monitor report, body names the source; corpus target fixed) and the ephemeral-`0x16` question dissolved | done | [040](040-source-monitor.md); F64 |
+| 41 | Player 2: symmetric by audit, confirmed by a hands-on session; loads now logged. Cue write-back: no ground truth anywhere, evidence-blocked | done / blocked on evidence | [041](041-player-2-and-cue-write-back.md) |
 
 ## Acceptance: what the CLI must be able to do
 
