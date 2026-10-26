@@ -72,8 +72,6 @@ pub struct VirtualPlayerConfig {
     pub portmap_port: u16,
     /// The waveform colour the settings answer names.
     pub waveform_color: prolink_proto::status::WaveformColor,
-    /// Whether to push the waveform settings to players unasked.
-    pub push_waveform_color: bool,
 }
 
 impl VirtualPlayerConfig {
@@ -87,7 +85,6 @@ impl VirtualPlayerConfig {
             generation: 0x00,
             portmap_port: prolink_proto::rpc::portmap::PORT,
             waveform_color: prolink_proto::status::WaveformColor::ThreeBand,
-            push_waveform_color: false,
         }
     }
 }
@@ -420,7 +417,6 @@ impl VirtualPlayer {
                 generation: config.generation,
                 emit_status: true,
                 waveform_color: config.waveform_color,
-                push_waveform_color: config.push_waveform_color,
                 ..VirtualCdjConfig::default()
             },
             source,

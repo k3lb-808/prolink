@@ -230,16 +230,10 @@ enum Command {
         #[arg(long, default_value_t = 111)]
         portmap_port: u16,
 
-        /// The waveform colour the settings answer names. What a deck renders
-        /// once it asks for the settings; the deck mostly never asks.
+        /// The waveform colour the settings answer names. A deck asks for the
+        /// settings at every boot and renders what the answer names.
         #[arg(long, default_value = "3band", value_parser = waveform_color)]
         waveform_color: WaveformColor,
-
-        /// Push the waveform settings to players unasked. An experiment: real
-        /// rekordbox answers `0x46` and sends nothing until asked, so this is
-        /// the only way the colour could reach a deck that never asks.
-        #[arg(long)]
-        push_waveform_color: bool,
     },
 
     /// Read a rekordbox `export.pdb` and list what is on it.
@@ -343,11 +337,6 @@ fn init_tracing(verbosity: u8) {
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "a command dispatcher reads as one flat match; splitting it would scatter the \
-              CLI's structure"
-)]
 async fn run(cli: Cli) -> Result<(), BoxedError> {
     match cli.command {
         Command::Interfaces => list_interfaces(),
@@ -426,7 +415,6 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
             generation,
             portmap_port,
             waveform_color,
-            push_waveform_color,
         } => {
             let interface = choose_interface(cli.interface.as_deref())?;
             let config = VirtualPlayerConfig {
@@ -436,7 +424,6 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
                 generation,
                 portmap_port,
                 waveform_color,
-                push_waveform_color,
                 ..VirtualPlayerConfig::new(interface)
             };
             serve(config, usb.as_deref(), sd.as_deref()).await
@@ -634,7 +621,6 @@ async fn serve(
         WaveformColor::Rgb => "rgb",
         WaveformColor::ThreeBand => "3band",
     };
-    let pushed = config.push_waveform_color;
     let rekordbox_kind = config.kind == DeviceKind::REKORDBOX_OR_CDJ3000;
     let server = VirtualPlayer::start(config, media).await?;
 
@@ -647,10 +633,7 @@ async fn serve(
         ports.nfs,
         server.dbserver_port(),
     );
-    println!(
-        "waveform colour {colour} · unasked push {}",
-        if pushed { "on" } else { "off" },
-    );
+    println!("waveform colour {colour}");
     if server.is_discoverable() {
         println!("press LINK on a CDJ; we should be listed as a source");
     } else {

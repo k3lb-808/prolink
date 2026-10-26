@@ -212,14 +212,6 @@ pub struct VirtualCdjConfig {
     /// The waveform colour the settings answer names, and what our own status
     /// block echoes.
     pub waveform_color: WaveformColor,
-    /// Whether to push the waveform settings to players unasked.
-    ///
-    /// An experiment: a real rekordbox answers `0x46` and sends nothing until
-    /// asked, and the AZ mostly never asks, so the colour it draws is whatever
-    /// it defaults to. This unicasts the `0x47` answer to every player heard
-    /// from, once, in the shape of a reply — if the deck accepts it, the
-    /// configured colour takes effect without a fresh boot on its side.
-    pub push_waveform_color: bool,
 }
 
 impl Default for VirtualCdjConfig {
@@ -232,7 +224,6 @@ impl Default for VirtualCdjConfig {
             firmware: "1.44".to_owned(),
             emit_status: true,
             waveform_color: WaveformColor::ThreeBand,
-            push_waveform_color: false,
         }
     }
 }
@@ -1302,7 +1293,6 @@ impl VirtualCdj {
         let peers = Arc::clone(&self.peers);
         let tap = self.status_tap.clone();
         let waveform_color = self.config.waveform_color;
-        let push_waveform_color = self.config.push_waveform_color;
 
         tokio::spawn(async move {
             let mut buffer = vec![0u8; MAX_DATAGRAM];
@@ -1310,8 +1300,6 @@ impl VirtualCdj {
             // datagrams: the last ui byte seen and when it last fired.
             let mut browsing: std::collections::HashMap<u8, (u8, Instant)> =
                 std::collections::HashMap::new();
-            // Players the unasked waveform push has already reached.
-            let mut pushed: std::collections::HashSet<u8> = std::collections::HashSet::new();
             // The last source-monitor report: its source and when, so a burst
             // logs once instead of fourteen times.
             let mut monitoring: Option<(DeviceNumber, Instant)> = None;
@@ -1370,24 +1358,6 @@ impl VirtualCdj {
                         let Some(player) = peer.sender() else {
                             continue;
                         };
-                        // The unasked waveform push: one `0x47` per player
-                        // heard from, shaped exactly like the answer to a
-                        // `0x46` (the deck's queries leave from ephemeral
-                        // ports and answers go to `:50002`, so the address is
-                        // the only thing that matters).
-                        if push_waveform_color && pushed.insert(player.get()) {
-                            let response =
-                                status::WaveformSettingsResponse::build(name, ours, waveform_color);
-                            let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));
-                            match socket.send_to(response.as_bytes(), to).await {
-                                Ok(_) => {
-                                    info!(player = %player, "pushed the waveform settings unasked");
-                                }
-                                Err(error) => {
-                                    warn!(%error, "could not push the waveform settings");
-                                }
-                            }
-                        }
                         if announce_due(&mut browsing, player.get(), ui, Instant::now()) {
                             let announce = status::SourceAnnounce::build(name, ours);
                             let to = SocketAddr::V4(SocketAddrV4::new(*from.ip(), STATUS_PORT));

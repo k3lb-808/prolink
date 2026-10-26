@@ -88,3 +88,15 @@ Unit tests: per-colour byte, no other byte differs, the status echo.
   visual reference of what real rekordbox's RGB looked like on this deck.
   So: the byte is correct end-to-end; whether the deck's RGB look is
   *wanted* is the operator's eye, not a protocol question.
+
+## The push, afterwards: removed as redundant
+
+The push shipped as an experiment and earned its keep once: it answered
+whether a deck takes an unasked `0x47` (it does — see the verification
+above). But the boot-time ask turned out to be the rule, not the exception
+(F63 refined: the deck asks `0x46` at **every** boot, 0.2 s after the media
+query), so the natural path carries the colour and the push was the one
+packet in the serve path that real rekordbox never sends. Removed
+(`--push-waveform-color` gone from the CLI, the configs and the responder);
+the finding stays here and in PROTOCOL.md. A colour change takes effect on
+the deck's next boot.
