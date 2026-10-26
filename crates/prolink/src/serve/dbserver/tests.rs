@@ -2112,7 +2112,12 @@ mod eviction {
             // Each poll is a distinct key, as a real one is: the count is the
             // same thirteen but the descriptor's menu target differs, and a DJ
             // scrolling albums mints one key per album size besides.
-            session.remember(MessageKind::GET_METADATA, metadata + poll, 13, rows(13, poll));
+            session.remember(
+                MessageKind::GET_METADATA,
+                metadata + poll,
+                13,
+                rows(13, poll),
+            );
             let paged = page(&mut session, &shared, list, 500);
             assert_eq!(
                 paged.len(),

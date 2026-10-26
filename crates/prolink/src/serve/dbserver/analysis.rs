@@ -34,12 +34,11 @@
 use std::time::Duration;
 
 use prolink_proto::analysis::{self, Cue, PrefixWord};
-use prolink_proto::dbserver::{Arguments, Field, MediaInfo, Message, MessageKind, MenuItem};
+use prolink_proto::dbserver::{Arguments, Field, MediaInfo, MenuItem, Message, MessageKind};
 use prolink_rekordbox::FourCc;
 
 use crate::serve::Medium;
 use std::sync::atomic::{AtomicU32, Ordering};
-
 
 /// The blob of a whole tag chunk, with the byte length typed in front: what
 /// the AZ-era analysis-tag handler serves, restated for pushes.
@@ -47,7 +46,10 @@ pub(super) fn tag_chunk(medium: Option<&Medium>, track_id: u32, fourcc: FourCc) 
     let mut out = Vec::new();
     if let Some(medium) = medium {
         let parsed = medium.analysis(track_id);
-        for file in [&parsed.dat, &parsed.ext, &parsed.two_ex].into_iter().flatten() {
+        for file in [&parsed.dat, &parsed.ext, &parsed.two_ex]
+            .into_iter()
+            .flatten()
+        {
             for tag in file.tags(fourcc) {
                 out.extend_from_slice(&tag.total_len.to_le_bytes());
                 out.extend_from_slice(&tag.raw);
@@ -129,7 +131,11 @@ pub(super) fn push_row(
 /// The unsolicited analysis bundle a rekordbox source pushes right after it
 /// answers the beat grid and the waveform detail (ground truth: the rekordbox
 /// capture answered every detail the deck asked AND pushed the rest).
-pub(super) fn push_bundle(medium: Option<&Medium>, track_id: u32, after: MessageKind) -> Vec<Message> {
+pub(super) fn push_bundle(
+    medium: Option<&Medium>,
+    track_id: u32,
+    after: MessageKind,
+) -> Vec<Message> {
     let mut pushes = Vec::new();
     let mut tag_push = |fourcc: [u8; 4], request: MessageKind, out: &mut Vec<Message>| {
         let payload = tag_chunk(medium, track_id, FourCc(fourcc));
@@ -218,10 +224,9 @@ pub(super) fn reply(
                 out
             })
             .unwrap_or_default();
-        let reply = Message::binary_reply(
-            transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1],
-        )
-        .expect("analysis-tag reply always builds");
+        let reply =
+            Message::binary_reply(transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1])
+                .expect("analysis-tag reply always builds");
         let wire = reply.encode();
         let _ = std::fs::write(format!("/tmp/tag_{:06x}.bin", raw), &wire);
         return Some(reply);
@@ -233,16 +238,16 @@ pub(super) fn reply(
         let count = all.len() as u32;
         let mut payload = Vec::with_capacity(all.len() * 136);
         for (hot_cue, ty, time_ms, loop_ms, comment, cix, r, g, b) in all.into_iter() {
-            let bytes: Vec<u8> = comment.encode_utf16().chain([0u16])
+            let bytes: Vec<u8> = comment
+                .encode_utf16()
+                .chain([0u16])
                 .flat_map(|u| u.to_le_bytes())
                 .collect();
             let mut rec = vec![0u8; 136];
             rec[0x00..0x04].copy_from_slice(&136u32.to_le_bytes());
             rec[0x04..0x06].copy_from_slice(&(hot_cue as u16).to_le_bytes());
             let is_loop = ty == 2;
-            rec[0x06..0x08].copy_from_slice(
-                &(if is_loop { 2u16 } else { 1u16 }).to_le_bytes(),
-            );
+            rec[0x06..0x08].copy_from_slice(&(if is_loop { 2u16 } else { 1u16 }).to_le_bytes());
             rec[0x0a..0x0c].copy_from_slice(&1000u16.to_le_bytes());
             rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
             rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
@@ -269,7 +274,11 @@ pub(super) fn reply(
             payload.extend_from_slice(&rec);
         }
         return Message::binary_reply(
-            transaction, MessageKind::CUE_POINTS_EXT, kind, payload, &[count],
+            transaction,
+            MessageKind::CUE_POINTS_EXT,
+            kind,
+            payload,
+            &[count],
         );
     }
     if let Some(medium) = medium
@@ -556,19 +565,29 @@ fn extended(
         return Vec::new();
     };
     let mut out = Vec::new();
-    for list in medium.analysis(track_id)
-        .ext.as_ref()
+    for list in medium
+        .analysis(track_id)
+        .ext
+        .as_ref()
         .into_iter()
         .flat_map(prolink_rekordbox::AnlzFile::extended_cue_lists)
     {
         for cue in &list.cues {
             let pad = u32::from(cue.hot_cue);
-            let ty = match cue.cue_type { prolink_rekordbox::anlz::CueType::LOOP => 2u8, _ => 1u8 };
+            let ty = match cue.cue_type {
+                prolink_rekordbox::anlz::CueType::LOOP => 2u8,
+                _ => 1u8,
+            };
             out.push((
-                pad, ty, cue.time, cue.loop_time,
+                pad,
+                ty,
+                cue.time,
+                cue.loop_time,
                 cue.comment.clone(),
                 cue.hot_cue_color_index,
-                cue.hot_cue_color_red, cue.hot_cue_color_green, cue.hot_cue_color_blue,
+                cue.hot_cue_color_red,
+                cue.hot_cue_color_green,
+                cue.hot_cue_color_blue,
             ));
         }
     }

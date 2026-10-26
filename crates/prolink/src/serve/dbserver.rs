@@ -500,9 +500,7 @@ async fn serve(mut stream: TcpStream, shared: &Shared) -> Result<()> {
     // `0x14` every ground truth opens with. A deck that instead opens with a
     // full `INTRODUCE` request (the older generation's way) is answered by the
     // handler below, and gets no push from here.
-    if buffer.is_empty()
-        && read_more(&mut stream, &mut buffer).await? == 0
-    {
+    if buffer.is_empty() && read_more(&mut stream, &mut buffer).await? == 0 {
         return Ok(());
     }
     let mut session = Session::default();
@@ -809,13 +807,9 @@ impl Session {
                 // `recent` maps a descriptor to its newest set. Only drop the
                 // entry if it is the set being evicted; a later set for the
                 // same descriptor must survive.
-                if self
-                    .recent
-                    .get(&oldest.0)
-                    .is_some_and(|set| {
-                        u32::try_from(set.items.len()).unwrap_or(u32::MAX) == oldest.1
-                    })
-                    && !self.order.iter().any(|key| key.0 == oldest.0)
+                if self.recent.get(&oldest.0).is_some_and(|set| {
+                    u32::try_from(set.items.len()).unwrap_or(u32::MAX) == oldest.1
+                }) && !self.order.iter().any(|key| key.0 == oldest.0)
                 {
                     self.recent.remove(&oldest.0);
                 }
