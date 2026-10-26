@@ -2010,7 +2010,9 @@ impl SourceResponse {
                 .get(Self::OFF_NAME..Self::LEN)
                 .unwrap_or_default()
                 .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes(pair.try_into().unwrap()))
+                // `chunks_exact` guarantees the pair; the default is a
+                // never-taken arm, and the lint asks for no panic.
+                .map(|pair| u16::from_le_bytes(pair.try_into().unwrap_or([0; 2])))
                 .collect::<Vec<_>>(),
         )
     }
@@ -2041,9 +2043,11 @@ impl SourceResponse {
         for unit in label.encode_utf16() {
             encoded.extend_from_slice(&unit.to_le_bytes());
         }
-        let room = Self::LEN_NAME.min(encoded.len());
-        if let Some(field) = raw.get_mut(Self::OFF_NAME..Self::OFF_NAME + room) {
-            field.copy_from_slice(&encoded[..room]);
+        // Truncating the label is what a real player does with an
+        // over-long one, and keeps the copy a whole-vec affair.
+        encoded.truncate(Self::LEN_NAME);
+        if let Some(field) = raw.get_mut(Self::OFF_NAME..Self::OFF_NAME + encoded.len()) {
+            field.copy_from_slice(&encoded);
         }
         Self { raw }
     }

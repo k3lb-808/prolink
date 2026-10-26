@@ -50,10 +50,9 @@ pub(super) fn tag_chunk(medium: Option<&Medium>, track_id: u32, fourcc: FourCc) 
             .into_iter()
             .flatten()
         {
-            for tag in file.tags(fourcc) {
+            if let Some(tag) = file.tags(fourcc).next() {
                 out.extend_from_slice(&tag.total_len.to_le_bytes());
                 out.extend_from_slice(&tag.raw);
-                break;
             }
             if !out.is_empty() {
                 break;
@@ -137,7 +136,7 @@ pub(super) fn push_bundle(
     after: MessageKind,
 ) -> Vec<Message> {
     let mut pushes = Vec::new();
-    let mut tag_push = |fourcc: [u8; 4], request: MessageKind, out: &mut Vec<Message>| {
+    let tag_push = |fourcc: [u8; 4], request: MessageKind, out: &mut Vec<Message>| {
         let payload = tag_chunk(medium, track_id, FourCc(fourcc));
         if payload.is_empty() {
             return;
@@ -196,91 +195,18 @@ pub(super) fn reply(
     }
     if kind == MessageKind::GET_ANALYSIS_TAG || kind.0 == 0x2d04 {
         // AZ-era raw analysis-tag fetch (0x2c04 and sibling 0x2d04):
-        // [descriptor, track id, tag LE, container LE]. Reply blob is the
+        // [descriptor, track id, tag LE, container LE]. The blob is the
         // whole rekordbox tag chunk, with its own byte length prefixed;
         // trailing word 1 (ground truth from the rekordbox capture).
         let raw = message.number(2).unwrap_or(0);
-        let fourcc = prolink_rekordbox::FourCc(raw.swap_bytes().to_be_bytes());
-        let payload = medium
-            .map(|medium| {
-                let parsed = medium.analysis(track_id);
-                let mut out = Vec::new();
-                if fourcc == prolink_rekordbox::FourCc(*b"PSSI") {
-                    if let Ok(baked) = std::fs::read("/tmp/pssi_gt.bin") {
-                        return baked;
-                    }
-                }
-                tracing::debug!(track_id, fourcc = ?fourcc, dat=%parsed.dat.is_some(), ext=%parsed.ext.is_some(), two_ex=%parsed.two_ex.is_some(), "analysis-tag handler carriers");
-                for file in [&parsed.dat, &parsed.ext, &parsed.two_ex].into_iter().flatten() {
-                    for tag in file.tags(fourcc) {
-                        out.extend_from_slice(&tag.total_len.to_le_bytes());
-                        out.extend_from_slice(&tag.raw);
-                        break;
-                    }
-                    if !out.is_empty() {
-                        break;
-                    }
-                }
-                out
-            })
-            .unwrap_or_default();
-        let reply =
-            Message::binary_reply(transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1])
-                .expect("analysis-tag reply always builds");
-        let wire = reply.encode();
-        let _ = std::fs::write(format!("/tmp/tag_{:06x}.bin", raw), &wire);
-        return Some(reply);
+        let fourcc = FourCc(raw.swap_bytes().to_be_bytes());
+        let payload = analysis_tag_payload(medium, track_id, fourcc);
+        return Message::binary_reply(transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1]);
     }
     if kind == MessageKind::GET_CUE_POINTS_EXT {
-        // LAST KNOWN GOOD (markers load, deck stable): marker 0x4e at 0x34,
-        // otherwise the 136-byte record as decoded.
-        let all = extended(medium, track_id);
-        let count = all.len() as u32;
-        let mut payload = Vec::with_capacity(all.len() * 136);
-        for (hot_cue, ty, time_ms, loop_ms, comment, cix, r, g, b) in all.into_iter() {
-            let bytes: Vec<u8> = comment
-                .encode_utf16()
-                .chain([0u16])
-                .flat_map(|u| u.to_le_bytes())
-                .collect();
-            let mut rec = vec![0u8; 136];
-            rec[0x00..0x04].copy_from_slice(&136u32.to_le_bytes());
-            rec[0x04..0x06].copy_from_slice(&(hot_cue as u16).to_le_bytes());
-            let is_loop = ty == 2;
-            rec[0x06..0x08].copy_from_slice(&(if is_loop { 2u16 } else { 1u16 }).to_le_bytes());
-            rec[0x0a..0x0c].copy_from_slice(&1000u16.to_le_bytes());
-            rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
-            rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
-            rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
-            rec[0x48..0x4a].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
-            rec[0x4a..0x4a + bytes.len()].copy_from_slice(&bytes);
-            let tail = 0x4a + bytes.len();
-            rec[tail..tail + 4].copy_from_slice(&0x2cu32.to_le_bytes());
-            // The cue's own colour as rekordbox's PCO2/PCP2 record carries
-            // it: [colour index][R][G][B]; fall back to the ground-truth
-            // palette cycle when the medium records none.
-            let colour = if r == 0 && g == 0 && b == 0 && cix == 0 {
-                let palette: [[u8; 4]; 4] = [
-                    [0x2a, 0xff, 0x00, 0x00],
-                    [0x38, 0xb3, 0x00, 0xff],
-                    [0x16, 0x1a, 0xff, 0x00],
-                    [0x09, 0x00, 0xe0, 0xff],
-                ];
-                palette[(hot_cue as usize) % 4]
-            } else {
-                [cix, r, g, b]
-            };
-            rec[tail + 4..tail + 8].copy_from_slice(&colour);
-            payload.extend_from_slice(&rec);
-        }
-        return Message::binary_reply(
-            transaction,
-            MessageKind::CUE_POINTS_EXT,
-            kind,
-            payload,
-            &[count],
-        );
+        return cue_points_ext(transaction, medium, track_id);
     }
+
     if let Some(medium) = medium
         && medium.is_plain()
     {
@@ -345,6 +271,105 @@ pub(super) fn reply(
         _ => return None,
     };
     Message::binary_reply(transaction, response, kind, payload, trailing)
+}
+
+/// The extended-cue-points reply: one 136-byte record per cue.
+///
+/// Ground-truth-derived (`82950a7`, from a real deck's answer): "LAST KNOWN
+/// GOOD — markers load, the deck is stable" — marker `0x4e` at `0x34`,
+/// otherwise the 136-byte record as decoded. The offsets are constants
+/// inside the fixed-size record and the wire fields are u16 where any real
+/// cue number is tiny, so the raw casts and direct writes are deliberate;
+/// do not rework the shape without a fresh ground truth.
+#[expect(
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the ground-truth 136-byte cue record: offsets are constants inside the \
+          fixed-size buffer and the truncated wire fields never see a value that fits \
+          nowhere"
+)]
+fn cue_points_ext(transaction: u32, medium: Option<&Medium>, track_id: u32) -> Option<Message> {
+    let all = extended(medium, track_id);
+    let count = all.len() as u32;
+    let mut payload = Vec::with_capacity(all.len() * 136);
+    for (hot_cue, ty, time_ms, loop_ms, comment, cix, r, g, b) in all {
+        let bytes: Vec<u8> = comment
+            .encode_utf16()
+            .chain([0u16])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut rec = vec![0u8; 136];
+        rec[0x00..0x04].copy_from_slice(&136u32.to_le_bytes());
+        rec[0x04..0x06].copy_from_slice(&(hot_cue as u16).to_le_bytes());
+        let is_loop = ty == 2;
+        rec[0x06..0x08].copy_from_slice(&(if is_loop { 2u16 } else { 1u16 }).to_le_bytes());
+        rec[0x0a..0x0c].copy_from_slice(&1000u16.to_le_bytes());
+        rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
+        rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
+        rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
+        rec[0x48..0x4a].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
+        rec[0x4a..0x4a + bytes.len()].copy_from_slice(&bytes);
+        let tail = 0x4a + bytes.len();
+        rec[tail..tail + 4].copy_from_slice(&0x2cu32.to_le_bytes());
+        // The cue's own colour as rekordbox's PCO2/PCP2 record carries
+        // it: [colour index][R][G][B]; fall back to the ground-truth
+        // palette cycle when the medium records none.
+        let colour = if r == 0 && g == 0 && b == 0 && cix == 0 {
+            let palette: [[u8; 4]; 4] = [
+                [0x2a, 0xff, 0x00, 0x00],
+                [0x38, 0xb3, 0x00, 0xff],
+                [0x16, 0x1a, 0xff, 0x00],
+                [0x09, 0x00, 0xe0, 0xff],
+            ];
+            palette[(hot_cue as usize) % 4]
+        } else {
+            [cix, r, g, b]
+        };
+        rec[tail + 4..tail + 8].copy_from_slice(&colour);
+        payload.extend_from_slice(&rec);
+    }
+    Message::binary_reply(
+        transaction,
+        MessageKind::CUE_POINTS_EXT,
+        MessageKind::GET_CUE_POINTS_EXT,
+        payload,
+        &[count],
+    )
+}
+
+/// The payload of an AZ-era raw analysis-tag fetch (0x2c04 and sibling
+/// 0x2d04): the whole rekordbox tag chunk named by the request's tag four-cc,
+/// with its own byte length prefixed. `dat`, then `ext`, then `.2EX` carry
+/// the tag — first carrier wins.
+fn analysis_tag_payload(medium: Option<&Medium>, track_id: u32, fourcc: FourCc) -> Vec<u8> {
+    medium
+        .map(|medium| {
+            let parsed = medium.analysis(track_id);
+            let mut out = Vec::new();
+            tracing::debug!(
+                track_id,
+                fourcc = ?fourcc,
+                dat = %parsed.dat.is_some(),
+                ext = %parsed.ext.is_some(),
+                two_ex = %parsed.two_ex.is_some(),
+                "analysis-tag handler carriers",
+            );
+            for file in [&parsed.dat, &parsed.ext, &parsed.two_ex]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(tag) = file.tags(fourcc).next() {
+                    out.extend_from_slice(&tag.total_len.to_le_bytes());
+                    out.extend_from_slice(&tag.raw);
+                }
+                if !out.is_empty() {
+                    break;
+                }
+            }
+            out
+        })
+        .unwrap_or_default()
 }
 
 /// A preview waveform's bytes as a player is sent them, a plain file's all
@@ -573,7 +598,7 @@ fn extended(
         .flat_map(prolink_rekordbox::AnlzFile::extended_cue_lists)
     {
         for cue in &list.cues {
-            let pad = u32::from(cue.hot_cue);
+            let pad = cue.hot_cue;
             let ty = match cue.cue_type {
                 prolink_rekordbox::anlz::CueType::LOOP => 2u8,
                 _ => 1u8,

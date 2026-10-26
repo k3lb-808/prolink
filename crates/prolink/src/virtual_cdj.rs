@@ -1289,6 +1289,11 @@ impl VirtualCdj {
     /// accepted us — it is unicasting status to us and has completed a portmap
     /// and mount against our NFS server — still refuses to list us as a LINK
     /// source, because as far as it knows our slots hold nothing (F24).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the datagram dispatch reads as one flat match over the kinds it answers; \
+                  splitting it would scatter the protocol logic"
+    )]
     fn spawn_query_responder(&self, socket: Arc<UdpSocket>) -> JoinHandle<()> {
         let name = self.config.name;
         let number = Arc::clone(&self.number);

@@ -343,6 +343,11 @@ fn init_tracing(verbosity: u8) {
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "a command dispatcher reads as one flat match; splitting it would scatter the \
+              CLI's structure"
+)]
 async fn run(cli: Cli) -> Result<(), BoxedError> {
     match cli.command {
         Command::Interfaces => list_interfaces(),
@@ -424,19 +429,17 @@ async fn run(cli: Cli) -> Result<(), BoxedError> {
             push_waveform_color,
         } => {
             let interface = choose_interface(cli.interface.as_deref())?;
-            serve(
-                interface,
-                usb.as_deref(),
-                sd.as_deref(),
-                number,
-                &name,
+            let config = VirtualPlayerConfig {
+                preferred_number: number,
+                name: DeviceName::new(&name),
                 kind,
                 generation,
                 portmap_port,
                 waveform_color,
                 push_waveform_color,
-            )
-            .await
+                ..VirtualPlayerConfig::new(interface)
+            };
+            serve(config, usb.as_deref(), sd.as_deref()).await
         }
         Command::Tracks {
             file,
@@ -589,22 +592,15 @@ async fn browse(
 
 /// Serve local media to real CDJs.
 async fn serve(
-    interface: Interface,
+    config: VirtualPlayerConfig,
     usb: Option<&std::path::Path>,
     sd: Option<&std::path::Path>,
-    number: Option<BrowsableDeviceNumber>,
-    name: &str,
-    kind: DeviceKind,
-    generation: u8,
-    portmap_port: u16,
-    waveform_color: WaveformColor,
-    push_waveform_color: bool,
 ) -> Result<(), BoxedError> {
     let mut media = Vec::new();
     // A rekordbox-class source serves its collection in the rekordbox slot:
     // the deck's media query and every descriptor it then sends name slot 4,
     // not the USB slot a player's stick sits in.
-    let usb_slot = if kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+    let usb_slot = if config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
         ServedSlot::REKORDBOX
     } else {
         ServedSlot::USB
@@ -632,16 +628,14 @@ async fn serve(
         media.push(std::sync::Arc::new(medium));
     }
 
-    let config = VirtualPlayerConfig {
-        preferred_number: number,
-        name: DeviceName::new(name),
-        kind,
-        generation,
-        portmap_port,
-        waveform_color,
-        push_waveform_color,
-        ..VirtualPlayerConfig::new(interface)
+    // Read before `start` takes the config.
+    let colour = match config.waveform_color {
+        WaveformColor::Blue => "blue",
+        WaveformColor::Rgb => "rgb",
+        WaveformColor::ThreeBand => "3band",
     };
+    let pushed = config.push_waveform_color;
+    let rekordbox_kind = config.kind == DeviceKind::REKORDBOX_OR_CDJ3000;
     let server = VirtualPlayer::start(config, media).await?;
 
     let ports = server.nfs_ports();
@@ -653,21 +647,16 @@ async fn serve(
         ports.nfs,
         server.dbserver_port(),
     );
-    let colour = match waveform_color {
-        WaveformColor::Blue => "blue",
-        WaveformColor::Rgb => "rgb",
-        WaveformColor::ThreeBand => "3band",
-    };
     println!(
         "waveform colour {colour} · unasked push {}",
-        if push_waveform_color { "on" } else { "off" },
+        if pushed { "on" } else { "off" },
     );
     if server.is_discoverable() {
         println!("press LINK on a CDJ; we should be listed as a source");
     } else {
         // Where the generation probes differs: 111 for old players (F46),
         // 50111 for the AZ's rekordbox-class sources.
-        let (probed, advice) = if kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+        let (probed, advice) = if rekordbox_kind {
             (
                 50111,
                 "50111 is unprivileged, so this should not happen — another \
