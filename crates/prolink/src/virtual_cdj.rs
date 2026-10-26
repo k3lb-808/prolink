@@ -128,6 +128,15 @@ const STATUS_CHECK: Duration = Duration::from_millis(5);
 /// change, cluster at ~64 ms. A burst of changes goes out at that rate.
 const STATUS_FLOOR: Duration = Duration::from_millis(62);
 
+/// How long after our own start the source announce goes out.
+///
+/// rekordbox presents itself ~0.8 s after its start, three copies to a player,
+/// and the deck's media query follows the announce rather than the identity
+/// handshake. It is measured from *our* start, which is later than our claim —
+/// but a deck that heard the claim has been re-evaluating us within ~60 ms
+/// anyway, so the announce is fidelity, not the listing gate.
+const ANNOUNCE_AT_STARTUP: Duration = Duration::from_millis(800);
+
 /// Keep-alive byte `0x25` when this device was first onto the network.
 ///
 /// Held while no other device says it. A deck holding it keeps it as peers
@@ -593,6 +602,12 @@ impl VirtualCdj {
             // does not publish what it is doing has no business claiming a
             // beat, and the two are read together by everything downstream.
             cdj.tasks.push(cdj.spawn_beats()?);
+            // A rekordbox-class source presents itself: the announce a deck
+            // lists a source by, ~0.8 s after our start. Old-generation
+            // players have no such packet and never asked for one.
+            if cdj.config.kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
+                cdj.tasks.push(cdj.spawn_startup_announce(discovery));
+            }
         }
         Ok(cdj)
     }
@@ -1167,6 +1182,42 @@ impl VirtualCdj {
                 last = Some((now, published));
             }
         }))
+    }
+
+    /// Present the source to the players we already know: the source announce,
+    /// three copies, [`ANNOUNCE_AT_STARTUP`] after our start.
+    ///
+    /// This is the packet a deck lists a source by — the join ground truth
+    /// rides an announce batch, and the media query follows it within 0.2 s.
+    /// The responder's browser-open trigger covers peers heard after this.
+    fn spawn_startup_announce(&self, discovery: &Discovery) -> JoinHandle<()> {
+        let socket = Arc::clone(self.status_socket.as_ref().expect("status is on"));
+        let name = self.config.name;
+        let number = Arc::clone(&self.number);
+        let table = PeerAddresses::new(discovery);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(ANNOUNCE_AT_STARTUP).await;
+            let Some(ours) = DeviceNumber::new(number.load(Ordering::Relaxed)) else {
+                return;
+            };
+            let peers = table.get();
+            if peers.is_empty() {
+                return;
+            }
+            let count = peers.len();
+            let announce = status::SourceAnnounce::build(name, ours);
+            for peer in peers {
+                let to = SocketAddr::V4(SocketAddrV4::new(peer, STATUS_PORT));
+                for _ in 0..3 {
+                    if let Err(error) = socket.send_to(announce.as_bytes(), to).await {
+                        debug!(%error, "startup announce not sent");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            info!(peers = count, "announced the source at startup");
+        })
     }
 
     /// Broadcast a beat packet on UDP 50001 as each beat arrives.

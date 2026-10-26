@@ -50,6 +50,7 @@ Status key: `todo` · `wip` · `done` · `blocked` · `dropped`
 | 36 | What the CDJ-to-CDJ captures teach: we give up "first on the network" to a real deck, status goes out on a change, and a slot is asked about as a deck asks | done, on no real CDJ | [033](033-what-the-cdj-to-cdj-captures-teach.md); three wire changes, each its own commit; 0.4.0 |
 | 37 | Plain sticks both ways: a stick with no rekordbox library served by its folders and read in a player by its FOLDER menus, a plain track announced as one, each player asked about its own media, and a medium's size in eight bytes | done, on no real CDJ | [034](034-plain-sticks-both-ways.md); emu-captures E23-E25; CI green and Rust 1.97; 0.5.0 |
 | 38 | The waveform colour: pinned to the `0x47` answer's one settings byte, `--waveform-color`, and an unasked push as an experiment | done, verified on the deck | [038](038-waveform-colour.md); F59–F63: the TCP waveform data is identical across preferences, `0x29` is not the channel, the deck asks `0x46` about once per session — and takes an unasked answer live |
+| 39 | Kind-aware discovery (the AZ probes the portmapper on 50111; the 111 warnings were false alarms) and the startup announce ~0.8 s after our start | done, on-deck check open | [039](039-kind-aware-discovery-and-startup-announce.md) |
 
 ## Acceptance: what the CLI must be able to do
 
