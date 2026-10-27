@@ -278,15 +278,17 @@ pub(super) fn reply(
 /// Overlay a track's deck-written cues onto its extended-cue list: a removed
 /// hot cue's record is dropped; a set one replaces its base record, keeping
 /// the comment and colour the base carried, or lands as a new record with an
-/// empty comment and the deck's colour bytes when there was none.
+/// empty comment and the deck's colour bytes when there was none. The deck's
+/// one working memory cue lands at its position unless that position was
+/// cleared; base memory entries at cleared positions drop.
 pub(super) fn apply_extended_overlay(
     all: &mut Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8)>,
     overlay: &TrackOverlay,
 ) {
-    all.retain(|(pad, ..)| {
-        u16::try_from(*pad)
-            .ok()
-            .is_none_or(|hot_cue| !overlay.removed.contains(&hot_cue))
+    all.retain(|(pad, _, time_ms, ..)| {
+        let hot_cue = u16::try_from(*pad);
+        !(hot_cue.is_ok_and(|hot_cue| overlay.removed.contains(&hot_cue))
+            || (*pad == 0 && overlay.memory_cleared.contains(time_ms)))
     });
     for (hot_cue, record) in &overlay.upserts {
         let pad = u32::from(*hot_cue);
@@ -304,6 +306,18 @@ pub(super) fn apply_extended_overlay(
                 // that read is settled (F65).
                 all.push((pad, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0));
             }
+        }
+    }
+    if let Some(record) = &overlay.memory {
+        let ty = u8::try_from(record.cue_type()).unwrap_or(1);
+        let time_ms = record.time_ms();
+        let loop_ms = record.loop_ms();
+        match all
+            .iter_mut()
+            .find(|entry| entry.0 == 0 && entry.2 == time_ms)
+        {
+            Some(entry) => entry.3 = loop_ms,
+            None => all.push((0, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0)),
         }
     }
 }
@@ -578,10 +592,15 @@ fn cue_points(
 }
 
 /// Overlay a track's deck-written cues onto its memory-point list: drops for
-/// the removed hot cues, and for the set ones a replacement that keeps the
-/// base record's ordering field or mints the observed pattern for a new one.
+/// the removed hot cues and for memory entries at cleared positions, and for
+/// the set ones a replacement that keeps the base record's ordering field or
+/// mints the observed pattern for a new one. The deck's one working memory
+/// cue lands at its position, latest set winning.
 pub(super) fn apply_memory_overlay(list: &mut Vec<Cue>, overlay: &TrackOverlay) {
-    list.retain(|cue| !overlay.removed.contains(&cue.hot_cue));
+    list.retain(|cue| {
+        !(overlay.removed.contains(&cue.hot_cue)
+            || (cue.hot_cue == 0 && overlay.memory_cleared.contains(&cue.time_ms)))
+    });
     for (hot_cue, record) in &overlay.upserts {
         let ty = u8::try_from(record.cue_type()).unwrap_or(1);
         let fresh = Cue {
@@ -595,6 +614,22 @@ pub(super) fn apply_memory_overlay(list: &mut Vec<Cue>, overlay: &TrackOverlay) 
                 cue.time_ms = fresh.time_ms;
                 cue.loop_time_ms = fresh.loop_time_ms;
             }
+            None => list.push(fresh),
+        }
+    }
+    if let Some(record) = &overlay.memory {
+        let ty = u8::try_from(record.cue_type()).unwrap_or(1);
+        let fresh = Cue {
+            order: u16::from(ty).saturating_mul(0x100),
+            hot_cue: 0,
+            time_ms: record.time_ms(),
+            loop_time_ms: record.loop_ms(),
+        };
+        match list
+            .iter_mut()
+            .find(|cue| cue.hot_cue == 0 && cue.time_ms == fresh.time_ms)
+        {
+            Some(cue) => cue.loop_time_ms = fresh.loop_time_ms,
             None => list.push(fresh),
         }
     }

@@ -2790,6 +2790,22 @@ fn hex_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
+/// The live session's memory-cue record (F66): 76 bytes, cue number zero,
+/// the position swapped for the test's.
+fn memory_write_record(time_ms: u32) -> CueWriteRecord {
+    const SET: &str = concat!(
+        "4c000000000001000000e803e4070000",
+        "ffffffff000000000000000000000000",
+        "00000000ffffffffffffffffffffffff",
+        "ffffffff120000000000000000000000",
+        "00000000000000000000000000000000",
+        "0000"
+    );
+    let mut raw = hex_bytes(SET);
+    raw[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
+    CueWriteRecord::parse(&raw).expect("the memory record")
+}
+
 #[test]
 fn a_cue_write_sidecar_replays_whole() {
     let dir = std::env::temp_dir().join(format!(
@@ -2871,7 +2887,82 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
     let removal = TrackOverlay {
         upserts: BTreeMap::new(),
         removed: [1].into(),
+        ..TrackOverlay::default()
     };
     apply_memory_overlay(&mut memory, &removal);
     assert!(memory.is_empty(), "a removed hot cue leaves the list");
+}
+
+#[test]
+fn a_memory_cue_is_one_moved_slot_not_a_numbered_family() {
+    // The deck's memory cue follows the button: a second set at a new
+    // position is a move — the wire showed a bare set with no remove in
+    // between, in both live sessions (F66). The overlay must hold ONE
+    // placement, the latest, not a family keyed by the always-zero number.
+    let overlay = TrackOverlay {
+        memory: Some(memory_write_record(4040)),
+        ..TrackOverlay::default()
+    };
+    let mut extended = Vec::new();
+    apply_extended_overlay(&mut extended, &overlay);
+    assert_eq!(extended.len(), 1, "the move replaced, not duplicated");
+    assert_eq!((extended[0].0, extended[0].2), (0, 4040));
+
+    // A remove clears the placement and the base list's entry at that
+    // position.
+    let base = vec![
+        (0u32, 1u8, 4040u32, u32::MAX, String::new(), 0, 0, 0, 0),
+        (0, 1, 77000, u32::MAX, String::new(), 0, 0, 0, 0),
+        (1, 1, 220, u32::MAX, "intro".to_owned(), 0, 0, 0, 0),
+    ];
+    let overlay = TrackOverlay {
+        memory_cleared: [4040].into(),
+        ..TrackOverlay::default()
+    };
+    let mut extended = base.clone();
+    apply_extended_overlay(&mut extended, &overlay);
+    assert_eq!(
+        extended.iter().map(|e| e.2).collect::<Vec<_>>(),
+        vec![77000, 220],
+        "only the cleared position drops"
+    );
+
+    // And a set back at the cleared position un-clears it.
+    let overlay = TrackOverlay {
+        memory: Some(memory_write_record(4040)),
+        memory_cleared: [4040].into(),
+        ..TrackOverlay::default()
+    };
+    let mut extended = base;
+    apply_extended_overlay(&mut extended, &overlay);
+    assert!(
+        extended.iter().any(|e| e.0 == 0 && e.2 == 4040),
+        "a re-set at a cleared position lands"
+    );
+}
+
+#[test]
+fn a_memory_cue_replays_through_the_sidecar_whole() {
+    let dir = std::env::temp_dir().join(format!(
+        "prolink-cue-memory-{}-{:?}",
+        std::process::id(),
+        Duration::from_secs(u64::from(std::process::id()))
+    ));
+    std::fs::create_dir_all(&dir).expect("a temp root");
+    let writes = CueWrites::new();
+    writes.apply(Some(&dir), 1012, true, &memory_write_record(2020));
+    writes.apply(Some(&dir), 1012, true, &memory_write_record(4040));
+    writes.apply(Some(&dir), 1012, false, &memory_write_record(4040));
+    let replayed = CueWrites::new();
+    let overlay = replayed.overlay_for(Some(&dir), 1012);
+    assert!(
+        overlay.memory.is_none(),
+        "the removed memory leaves no placement"
+    );
+    assert!(
+        overlay.memory_cleared.contains(&4040),
+        "the cleared position survives the replay"
+    );
+    drop(replayed);
+    let _ = std::fs::remove_dir_all(&dir);
 }
