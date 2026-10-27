@@ -279,8 +279,8 @@ pub(super) fn reply(
 /// hot cue's record is dropped; a set one replaces its base record, keeping
 /// the comment and colour the base carried, or lands as a new record with an
 /// empty comment and the deck's colour bytes when there was none. The deck's
-/// one working memory cue lands at its position unless that position was
-/// cleared; base memory entries at cleared positions drop.
+/// memory cues land at their positions, each a cue of its own; base memory
+/// entries at cleared positions drop.
 pub(super) fn apply_extended_overlay(
     all: &mut Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8, u8)>,
     overlay: &TrackOverlay,
@@ -308,18 +308,17 @@ pub(super) fn apply_extended_overlay(
             }
         }
     }
-    if let Some(record) = &overlay.memory {
+    for (position, record) in &overlay.memories {
         let ty = u8::try_from(record.cue_type()).unwrap_or(1);
-        let time_ms = record.time_ms();
         let loop_ms = record.loop_ms();
         match all
             .iter_mut()
-            .find(|entry| entry.0 == 0 && entry.2 == time_ms)
+            .find(|entry| entry.0 == 0 && entry.2 == *position)
         {
             Some(entry) => entry.3 = loop_ms,
             // The `0xff` row marks the deck's own fresh cue, so the builder
             // gives it the unset id rekordbox's list carries (F66).
-            None => all.push((0, ty, time_ms, loop_ms, String::new(), 0xff, 0, 0, 0, 0)),
+            None => all.push((0, ty, *position, loop_ms, String::new(), 0xff, 0, 0, 0, 0)),
         }
     }
 }
@@ -641,12 +640,12 @@ pub(super) fn apply_memory_overlay(list: &mut Vec<Cue>, overlay: &TrackOverlay) 
             None => list.push(fresh),
         }
     }
-    if let Some(record) = &overlay.memory {
+    for (position, record) in &overlay.memories {
         let ty = u8::try_from(record.cue_type()).unwrap_or(1);
         let fresh = Cue {
             order: u16::from(ty).saturating_mul(0x100),
             hot_cue: 0,
-            time_ms: record.time_ms(),
+            time_ms: *position,
             loop_time_ms: record.loop_ms(),
         };
         match list

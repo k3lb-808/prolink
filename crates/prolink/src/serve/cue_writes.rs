@@ -29,12 +29,13 @@
 //!
 //! Hot cues and memory cues part ways in the model (F66): a hot cue is
 //! identified by its slot number and the deck holds eight; a memory cue
-//! travels with number `0` and the deck holds **one** working placement that
-//! follows the button — pressing it again *moves* the cue, and the wire
-//! shows the move as a bare second set with no remove in between (both live
-//! sessions did exactly this). So a memory set replaces the stored one, and
-//! a memory remove clears both the stored one and the base list's entry at
-//! that position.
+//! travels with number `0` and its identity is the position — each set at a
+//! fresh position adds another cue (rekordbox's own served list kept every
+//! added one; the deck's single-remaining-write look of the bare-ack
+//! sessions was its unconfirmed-write loop, not a move), and a remove
+//! clears exactly the position it names. A memory set also un-clears its
+//! position: the deck re-set a cue the same DJ had just deleted is the
+//! deck's truth.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -52,9 +53,9 @@ pub struct TrackOverlay {
     pub upserts: BTreeMap<u16, CueWriteRecord>,
     /// Hot-cue numbers a deck removed.
     pub removed: BTreeSet<u16>,
-    /// The deck's one working memory cue, as last set: a later set moves it,
-    /// since the wire carries no identity beyond the position (F66).
-    pub memory: Option<CueWriteRecord>,
+    /// Memory cues the decks added, keyed by position: each set at a fresh
+    /// position is another cue (F66).
+    pub memories: BTreeMap<u32, CueWriteRecord>,
     /// Memory-cue positions a deck cleared, in milliseconds.
     pub memory_cleared: BTreeSet<u32>,
 }
@@ -87,13 +88,13 @@ impl CueWrites {
         let hot_cue = record.hot_cue();
         self.with_track_overlay(root, track, |overlay| {
             if hot_cue == 0 {
-                // A memory cue: the deck's one working placement, moved by
-                // the next set, cleared by a remove (F66).
+                // A memory cue: position-keyed, each fresh set another cue
+                // and a remove clearing its own position (F66).
                 if set {
-                    overlay.memory = Some(record.clone());
+                    overlay.memories.insert(record.time_ms(), record.clone());
                     overlay.memory_cleared.remove(&record.time_ms());
                 } else {
-                    overlay.memory = None;
+                    overlay.memories.remove(&record.time_ms());
                     overlay.memory_cleared.insert(record.time_ms());
                 }
             } else if set {
@@ -176,10 +177,9 @@ fn load(path: &Path) -> HashMap<u32, TrackOverlay> {
                     && let Ok(record) = CueWriteRecord::parse(&bytes)
                 {
                     if hot_cue == 0 {
-                        overlay.memory = Some(record);
-                        if let Some(record) = &overlay.memory {
-                            overlay.memory_cleared.remove(&record.time_ms());
-                        }
+                        let position = record.time_ms();
+                        overlay.memories.insert(position, record);
+                        overlay.memory_cleared.remove(&position);
                     } else {
                         overlay.upserts.insert(hot_cue, record);
                         overlay.removed.remove(&hot_cue);
@@ -188,8 +188,8 @@ fn load(path: &Path) -> HashMap<u32, TrackOverlay> {
             }
             ("R", position) => {
                 if hot_cue == 0 {
-                    overlay.memory = None;
                     if let Some(ms) = position.and_then(|f| f.parse().ok()) {
+                        overlay.memories.remove(&ms);
                         overlay.memory_cleared.insert(ms);
                     }
                 } else {

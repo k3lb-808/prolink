@@ -2899,26 +2899,33 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
 }
 
 #[test]
-fn a_memory_cue_is_one_moved_slot_not_a_numbered_family() {
-    // The deck's memory cue follows the button: a second set at a new
-    // position is a move — the wire showed a bare set with no remove in
-    // between, in both live sessions (F66). The overlay must hold ONE
-    // placement, the latest, not a family keyed by the always-zero number.
+fn memory_cues_accumulate_one_per_position() {
+    // Each set at a fresh position is another cue: rekordbox's own served
+    // list kept every added one side by side (F66), and the deck renders
+    // from the list it is answered with. A re-set at the same position
+    // replaces that cue; a remove clears just its position.
     let overlay = TrackOverlay {
-        memory: Some(memory_write_record(4040)),
+        memories: [
+            (2020, memory_write_record(2020)),
+            (4040, memory_write_record(4040)),
+        ]
+        .into(),
         ..TrackOverlay::default()
     };
     let mut extended = Vec::new();
     apply_extended_overlay(&mut extended, &overlay);
-    assert_eq!(extended.len(), 1, "the move replaced, not duplicated");
-    assert_eq!((extended[0].0, extended[0].2), (0, 4040));
+    assert_eq!(
+        extended.iter().map(|e| (e.0, e.2)).collect::<Vec<_>>(),
+        vec![(0, 2020), (0, 4040)],
+        "two sets at fresh positions are two cues"
+    );
     assert_eq!(
         extended[0].5, 0xff,
-        "the deck's own fresh cue rides the unset-id sentinel"
+        "the deck's own fresh cues ride the unset-id sentinel"
     );
 
-    // A remove clears the placement and the base list's entry at that
-    // position.
+    // A remove clears the base list's entry at its position, and only
+    // there.
     let base = vec![
         (0u32, 1u8, 4040u32, u32::MAX, String::new(), 0, 0, 0, 0, 0),
         (0, 1, 77000, u32::MAX, String::new(), 0, 0, 0, 0, 0),
@@ -2936,9 +2943,9 @@ fn a_memory_cue_is_one_moved_slot_not_a_numbered_family() {
         "only the cleared position drops"
     );
 
-    // And a set back at the cleared position un-clears it.
+    // A set back at the cleared position un-clears it.
     let overlay = TrackOverlay {
-        memory: Some(memory_write_record(4040)),
+        memories: [(4040, memory_write_record(4040))].into(),
         memory_cleared: [4040].into(),
         ..TrackOverlay::default()
     };
@@ -2964,8 +2971,13 @@ fn a_memory_cue_replays_through_the_sidecar_whole() {
     writes.apply(Some(&dir), 1012, false, &memory_write_record(4040));
     let replayed = CueWrites::new();
     let overlay = replayed.overlay_for(Some(&dir), 1012);
+    assert_eq!(
+        overlay.memories.get(&2020).map(CueWriteRecord::time_ms),
+        Some(2020),
+        "the untouched memory survives the replay"
+    );
     assert!(
-        overlay.memory.is_none(),
+        !overlay.memories.contains_key(&4040),
         "the removed memory leaves no placement"
     );
     assert!(
