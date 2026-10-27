@@ -1094,12 +1094,19 @@ impl VirtualCdj {
     /// 50002 about every 200 ms: 778 identical 56-byte datagrams in the AZ
     /// ground truth, so constant that only the name and the sender number are
     /// ours to write. The body is verbatim ground truth; its meaning is
-    /// unmapped.
+    /// unmapped — save one byte the fresh boot taught us (F66): the `0x01`
+    /// at `0x37` reads as "a library is here". The AZ-era capture this
+    /// constant was copied from carried `0x00` there, a source advertising no
+    /// library, and a booting deck that hears an empty source never asks for
+    /// the dbserver port at all: it sits on the browser for minutes or for
+    /// good. rekordbox's own live broadcast (`rekordbox_memory_cue`, F66)
+    /// carries `0x80` at `0x2c`, `0x3e80` at `0x2e` and the `0x01` — copied
+    /// verbatim.
     const SOURCE_STATUS: [u8; 56] = [
         0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x29, 0x72, 0x65, 0x6b, 0x6f,
         0x72, 0x64, 0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x01, 0x01, 0x29, 0x00, 0x38, 0x29, 0x00, 0x00, 0xc0, 0x00, 0x10, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x09, 0xff, 0x00,
+        0x00, 0x01, 0x01, 0x29, 0x00, 0x38, 0x29, 0x00, 0x00, 0xc0, 0x00, 0x10, 0x00, 0x00, 0x80,
+        0x00, 0x3e, 0x80, 0x00, 0x10, 0x00, 0x00, 0x00, 0x09, 0xff, 0x01,
     ];
 
     fn spawn_status(
@@ -1154,7 +1161,12 @@ impl VirtualCdj {
                     // a deck is listening for.
                     let mut packet = Self::SOURCE_STATUS;
                     packet[11..31].copy_from_slice(&config.name.0);
-                    packet[33] = number.load(Ordering::Relaxed);
+                    // The number rides twice: the sender byte at `0x21` and
+                    // again in the body at `0x24`, which the constant cannot
+                    // carry for a number we might be re-claiming.
+                    let ours = number.load(Ordering::Relaxed);
+                    packet[33] = ours;
+                    packet[36] = ours;
                     let to = SocketAddr::V4(SocketAddrV4::new(interface.broadcast(), STATUS_PORT));
                     if let Err(error) = shared.send_to(&packet, to).await {
                         debug!(%error, "source status broadcast failed");
@@ -2250,6 +2262,42 @@ mod tests {
     /// sees it: idle screen, browser opens, the announce fires; a repeat does
     /// not; leaving and re-entering the browser fires again; a browser held
     /// open re-fires after [`ANNOUNCE_RETRY`].
+    /// rekordbox's live source-status broadcast (F66, the
+    /// `rekordbox_memory_cue` capture): the shape every byte of the packet
+    /// must match, save the name and the two number slots.
+    const REKORDBOX_BROADCAST: [u8; 56] = [
+        0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x29, 0x72, 0x65, 0x6b, 0x6f,
+        0x72, 0x64, 0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x01, 0x2a, 0x00, 0x38, 0x2a, 0x00, 0x00, 0xc0, 0x00, 0x10, 0x00, 0x00, 0x80,
+        0x00, 0x3e, 0x80, 0x00, 0x10, 0x00, 0x00, 0x00, 0x09, 0xff, 0x01,
+    ];
+
+    #[test]
+    fn the_source_status_matches_rekordboxs_broadcast_with_our_name_and_number() {
+        // The fresh boot stalls when the heartbeat's body reads as an empty
+        // source (F66): the library byte at `0x37` and the `0x80`/`0x3e80`
+        // pair rekordbox carries are the difference between a deck that
+        // asks for the dbserver port at once and one that never does. The
+        // packet must stay byte-equal to rekordbox's own broadcast save the
+        // name and the two number slots.
+        let mut packet = VirtualCdj::SOURCE_STATUS;
+        let name = DeviceName::new("palme");
+        packet[11..31].copy_from_slice(&name.0);
+        packet[33] = 41;
+        packet[36] = 41;
+        let expected: Vec<u8> = REKORDBOX_BROADCAST
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, b)| match i {
+                11..=30 => name.0[i - 11],
+                33 | 36 => 41,
+                _ => b,
+            })
+            .collect();
+        assert_eq!(packet.as_slice(), expected.as_slice());
+    }
+
     #[test]
     fn the_browser_open_announce_fires_on_the_edge_and_again_after_the_retry() {
         let mut browsing = std::collections::HashMap::new();
