@@ -767,22 +767,21 @@ impl Session {
                             record = hex_encode(record.raw()),
                             "a deck wrote a cue",
                         );
-                        // A deck draws a placed memory cue only once the
-                        // source reflects it back — on a stick there is no
-                        // write at all and the deck draws its own at once,
-                        // on rekordbox the agent pushes the fresh list. So
-                        // a memory write is answered with the refreshed
-                        // extended-cue list, unsolicited (F66).
-                        if hot_cue == 0
-                            && let Some(reply) = analysis::cue_points_ext(
-                                analysis::push_txn_pub(),
-                                Some(&medium),
-                                track,
-                                &shared.cue_writes,
-                            )
-                        {
-                            push(out, &reply);
+                        // rekordbox answers a cue write with the refreshed
+                        // extended-cue list on the write's own transaction
+                        // — no bare success at all — and the deck draws a
+                        // placed cue only once the source reflects it back
+                        // (F66, the rekordbox capture). Match that.
+                        match analysis::cue_points_ext(
+                            transaction,
+                            Some(&medium),
+                            track,
+                            &shared.cue_writes,
+                        ) {
+                            Some(reply) => push(out, &reply),
+                            None => push(out, &Message::success(transaction, kind, 0)),
                         }
+                        return Flow::Continue;
                     }
                 } else if message.blob(4).is_some() {
                     let bytes = message.blob(4).map(<[u8]>::len);

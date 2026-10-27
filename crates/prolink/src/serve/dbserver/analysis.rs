@@ -71,11 +71,6 @@ fn push_txn() -> u32 {
     PUSH_TXN.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The transaction id for one unsolicited push, from the caller's side.
-pub(super) fn push_txn_pub() -> u32 {
-    push_txn()
-}
-
 /// The PWV6 tag and the artwork of one rendered track row, appended right
 /// after the footer of the render that drew it — exactly what the rekordbox
 /// capture pushes after a track list's menu items, per visible row, in row
@@ -322,19 +317,25 @@ pub(super) fn apply_extended_overlay(
             .find(|entry| entry.0 == 0 && entry.2 == time_ms)
         {
             Some(entry) => entry.3 = loop_ms,
-            None => all.push((0, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0, 0)),
+            // The `0xff` row marks the deck's own fresh cue, so the builder
+            // gives it the unset id rekordbox's list carries (F66).
+            None => all.push((0, ty, time_ms, loop_ms, String::new(), 0xff, 0, 0, 0, 0)),
         }
     }
 }
 
 /// The extended-cue-points reply: one 136-byte record per cue.
 ///
-/// Ground-truth-derived (`82950a7`, from a real deck's answer): "LAST KNOWN
-/// GOOD — markers load, the deck is stable" — marker `0x4e` at `0x34`,
-/// otherwise the 136-byte record as decoded. The offsets are constants
-/// inside the fixed-size record and the wire fields are u16 where any real
-/// cue number is tiny, so the raw casts and direct writes are deliberate;
-/// do not rework the shape without a fresh ground truth.
+/// Ground truth in two rounds: our own records first (`82950a7`, "markers
+/// load, the deck is stable" — marker `0x4e` at `0x34`), then rekordbox's
+/// own served list (F66, the `rekordbox_memory_cue` capture), which settled
+/// the memory cues: a memory entry carries a 0-based list index at `0x20`
+/// and a 1-based id at `0x22` (the deck's own fresh one id `0xffff`), no
+/// colour anywhere — the deck draws memory arrows in its own default —
+/// while a hot entry keeps its `[index][R][G][B]` tail. The offsets are
+/// constants inside the fixed-size record and the wire fields are u16 where
+/// any real cue number is tiny, so the raw casts and direct writes are
+/// deliberate; do not rework the shape without a fresh ground truth.
 #[expect(
     clippy::indexing_slicing,
     clippy::as_conversions,
@@ -354,6 +355,7 @@ pub(super) fn cue_points_ext(
     apply_extended_overlay(&mut all, &overlay);
     let count = all.len() as u32;
     let mut payload = Vec::with_capacity(all.len() * 136);
+    let mut memory_index = 0u16;
     for (hot_cue, ty, time_ms, loop_ms, comment, row, cix, r, g, b) in all {
         let bytes: Vec<u8> = comment
             .encode_utf16()
@@ -362,11 +364,6 @@ pub(super) fn cue_points_ext(
             .collect();
         let mut rec = vec![0u8; 136];
         rec[0x00..0x04].copy_from_slice(&136u32.to_le_bytes());
-        // The memory-cue colour row (the PCP2 file's byte 28) rides the base
-        // fields at the same relative spot; nobody has caught a real deck's
-        // list carrying one, so both candidate spots get it — a stray row id
-        // in an ignored position costs nothing (F66).
-        rec[0x14] = row;
         rec[0x04..0x06].copy_from_slice(&(hot_cue as u16).to_le_bytes());
         let is_loop = ty == 2;
         rec[0x06..0x08].copy_from_slice(&(if is_loop { 2u16 } else { 1u16 }).to_le_bytes());
@@ -374,32 +371,42 @@ pub(super) fn cue_points_ext(
         rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
         rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
         rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
+        if hot_cue == 0 {
+            // rekordbox's memory entries carry a 0-based list index and a
+            // 1-based id; the deck's own fresh cue rides id `0xffff` until
+            // the source numbers it (F66).
+            rec[0x20..0x22].copy_from_slice(&memory_index.to_le_bytes());
+            let id = if row == 0xff {
+                0xffffu16
+            } else {
+                memory_index + 1
+            };
+            rec[0x22..0x24].copy_from_slice(&id.to_le_bytes());
+            memory_index += 1;
+        }
         rec[0x48..0x4a].copy_from_slice(&(bytes.len() as u16).to_le_bytes());
         rec[0x4a..0x4a + bytes.len()].copy_from_slice(&bytes);
         let tail = 0x4a + bytes.len();
         rec[tail..tail + 4].copy_from_slice(&0x2cu32.to_le_bytes());
-        // The cue's own colour as rekordbox's PCO2/PCP2 record carries
-        // it: [colour index][R][G][B]. A memory cue's arrow follows its
-        // colour row, so the row id leads; the deck-written default was
-        // read as an out-of-table row and drew black (F66), so a memory
-        // cue with no row of its own lands on row 2, the red pad. Hot
-        // cues keep the ground-truth palette cycle when the medium
-        // records none.
-        let colour = if hot_cue == 0 {
-            let row = if row == 0 { 2 } else { row };
-            [row, r, g, b]
-        } else if r == 0 && g == 0 && b == 0 && cix == 0 {
-            let palette: [[u8; 4]; 4] = [
-                [0x2a, 0xff, 0x00, 0x00],
-                [0x38, 0xb3, 0x00, 0xff],
-                [0x16, 0x1a, 0xff, 0x00],
-                [0x09, 0x00, 0xe0, 0xff],
-            ];
-            palette[(hot_cue as usize) % 4]
-        } else {
-            [cix, r, g, b]
-        };
-        rec[tail + 4..tail + 8].copy_from_slice(&colour);
+        // A memory cue's arrow takes its colour from the deck itself, and
+        // rekordbox's list carries none in the record — ours must not
+        // either, or the deck reads the stray bytes as a row and draws
+        // black (F66). Hot cues keep the ground-truth palette cycle when
+        // the medium records none.
+        if hot_cue != 0 {
+            let colour = if r == 0 && g == 0 && b == 0 && cix == 0 {
+                let palette: [[u8; 4]; 4] = [
+                    [0x2a, 0xff, 0x00, 0x00],
+                    [0x38, 0xb3, 0x00, 0xff],
+                    [0x16, 0x1a, 0xff, 0x00],
+                    [0x09, 0x00, 0xe0, 0xff],
+                ];
+                palette[(hot_cue as usize) % 4]
+            } else {
+                [cix, r, g, b]
+            };
+            rec[tail + 4..tail + 8].copy_from_slice(&colour);
+        }
         payload.extend_from_slice(&rec);
     }
     Message::binary_reply(

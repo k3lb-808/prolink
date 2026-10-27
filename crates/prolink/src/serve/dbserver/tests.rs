@@ -2912,6 +2912,10 @@ fn a_memory_cue_is_one_moved_slot_not_a_numbered_family() {
     apply_extended_overlay(&mut extended, &overlay);
     assert_eq!(extended.len(), 1, "the move replaced, not duplicated");
     assert_eq!((extended[0].0, extended[0].2), (0, 4040));
+    assert_eq!(
+        extended[0].5, 0xff,
+        "the deck's own fresh cue rides the unset-id sentinel"
+    );
 
     // A remove clears the placement and the base list's entry at that
     // position.
