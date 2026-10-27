@@ -2790,6 +2790,16 @@ fn hex_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
+/// The set record with the cue type forced to a loop and the loop end
+/// filled, as the deck writes a loop: type 2 at `0x06`, the loop's end at
+/// `0x10`.
+fn loop_write_record(time_ms: u32, loop_ms: u32) -> CueWriteRecord {
+    let mut raw = cue_write_record(time_ms).raw().to_vec();
+    raw[0x06..0x08].copy_from_slice(&2u16.to_le_bytes());
+    raw[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
+    CueWriteRecord::parse(&raw).expect("the loop record")
+}
+
 /// The live session's memory-cue record (F66): 76 bytes, cue number zero,
 /// the position swapped for the test's.
 fn memory_write_record(time_ms: u32) -> CueWriteRecord {
@@ -2896,6 +2906,47 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
     };
     apply_memory_overlay(&mut memory, &removal);
     assert!(memory.is_empty(), "a removed hot cue leaves the list");
+}
+
+#[test]
+fn a_loop_written_over_a_point_lands_a_loop() {
+    // The deck writes a loop with type 2 and the loop's end; the overlay
+    // must carry the type into the entry it replaces, or the reload draws
+    // a point wearing a loop end (the deck-2 check that caught it).
+    let mut extended = vec![(
+        1u32,
+        1u8,
+        220u32,
+        u32::MAX,
+        "intro".to_owned(),
+        0u8,
+        0x2a,
+        0xff,
+        0,
+        0,
+    )];
+    let overlay = TrackOverlay {
+        upserts: [(1u16, loop_write_record(2110, 4880))].into(),
+        ..TrackOverlay::default()
+    };
+    apply_extended_overlay(&mut extended, &overlay);
+    assert_eq!(
+        (extended[0].1, extended[0].2, extended[0].3),
+        (2, 2110, 4880),
+        "type, position and loop end all ride the write"
+    );
+    assert_eq!(extended[0].4, "intro", "the base comment stays");
+
+    // And the plain memory-point list carries the type in its order field.
+    let mut memory = vec![prolink_proto::analysis::Cue {
+        order: 0x100,
+        hot_cue: 1,
+        time_ms: 220,
+        loop_time_ms: u32::MAX,
+    }];
+    apply_memory_overlay(&mut memory, &overlay);
+    assert_eq!((memory[0].order, memory[0].time_ms), (0x200, 2110));
+    assert_eq!(memory[0].loop_time_ms, 4880);
 }
 
 #[test]

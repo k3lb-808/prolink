@@ -297,6 +297,9 @@ pub(super) fn apply_extended_overlay(
         let loop_ms = record.loop_ms();
         match all.iter_mut().find(|entry| entry.0 == pad) {
             Some(entry) => {
+                // The write's cue type rides along: a loop written over a
+                // point must land a loop, not a point wearing a loop end.
+                entry.1 = ty;
                 entry.2 = time_ms;
                 entry.3 = loop_ms;
             }
@@ -315,7 +318,10 @@ pub(super) fn apply_extended_overlay(
             .iter_mut()
             .find(|entry| entry.0 == 0 && entry.2 == *position)
         {
-            Some(entry) => entry.3 = loop_ms,
+            Some(entry) => {
+                entry.1 = ty;
+                entry.3 = loop_ms;
+            }
             // The `0xff` row marks the deck's own fresh cue, so the builder
             // gives it the unset id rekordbox's list carries (F66).
             None => all.push((0, ty, *position, loop_ms, String::new(), 0xff, 0, 0, 0, 0)),
@@ -634,6 +640,7 @@ pub(super) fn apply_memory_overlay(list: &mut Vec<Cue>, overlay: &TrackOverlay) 
         };
         match list.iter_mut().find(|cue| &cue.hot_cue == hot_cue) {
             Some(cue) => {
+                cue.order = fresh.order;
                 cue.time_ms = fresh.time_ms;
                 cue.loop_time_ms = fresh.loop_time_ms;
             }
@@ -652,7 +659,10 @@ pub(super) fn apply_memory_overlay(list: &mut Vec<Cue>, overlay: &TrackOverlay) 
             .iter_mut()
             .find(|cue| cue.hot_cue == 0 && cue.time_ms == fresh.time_ms)
         {
-            Some(cue) => cue.loop_time_ms = fresh.loop_time_ms,
+            Some(cue) => {
+                cue.order = fresh.order;
+                cue.loop_time_ms = fresh.loop_time_ms;
+            }
             None => list.push(fresh),
         }
     }
