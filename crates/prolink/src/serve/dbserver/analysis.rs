@@ -405,9 +405,11 @@ pub(super) fn cue_points_ext(
                     hot_cue,
                     if *ty == 2 { "loop" } else { "pt" },
                     time_ms,
-                    (loop_ms != &u32::MAX)
-                        .then(|| format!("-{loop_ms}"))
-                        .unwrap_or_default(),
+                    if *loop_ms == u32::MAX {
+                        String::new()
+                    } else {
+                        format!("-{loop_ms}")
+                    },
                 )
             })
             .collect::<Vec<_>>()
