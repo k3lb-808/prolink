@@ -393,6 +393,27 @@ pub(super) fn cue_points_ext(
     let overlay = cue_writes.overlay_for(medium.and_then(Medium::root), track_id);
     apply_extended_overlay(&mut all, &overlay);
     let count = all.len() as u32;
+    // What this reply carries, entry by entry: the only way to argue about a
+    // loop the deck drew as a point is to see the list we served (F66).
+    tracing::debug!(
+        track_id,
+        entries = %all
+            .iter()
+            .map(|(hot_cue, ty, time_ms, loop_ms, ..)| {
+                format!(
+                    "{}:{}@{}{}",
+                    hot_cue,
+                    if *ty == 2 { "loop" } else { "pt" },
+                    time_ms,
+                    (loop_ms != &u32::MAX)
+                        .then(|| format!("-{loop_ms}"))
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        "served the extended cue list",
+    );
     // The Arc binding keeps the parsed analysis alive under the slice.
     let parsed = medium.map(|medium| medium.analysis(track_id));
     let grid: &[u8] = parsed
