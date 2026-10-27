@@ -206,7 +206,13 @@ pub(super) fn reply(
         return Message::binary_reply(transaction, MessageKind::ANALYSIS_TAG, kind, payload, &[1]);
     }
     if kind == MessageKind::GET_CUE_POINTS_EXT {
-        return cue_points_ext(transaction, medium, track_id, cue_writes);
+        return cue_points_ext(
+            transaction,
+            medium,
+            track_id,
+            cue_writes,
+            MessageKind::GET_CUE_POINTS_EXT,
+        );
     }
 
     if let Some(medium) = medium
@@ -388,6 +394,7 @@ pub(super) fn cue_points_ext(
     medium: Option<&Medium>,
     track_id: u32,
     cue_writes: &CueWrites,
+    request: MessageKind,
 ) -> Option<Message> {
     let mut all = extended(medium, track_id);
     let overlay = cue_writes.overlay_for(medium.and_then(Medium::root), track_id);
@@ -494,7 +501,7 @@ pub(super) fn cue_points_ext(
     Message::binary_reply(
         transaction,
         MessageKind::CUE_POINTS_EXT,
-        MessageKind::GET_CUE_POINTS_EXT,
+        request,
         payload,
         &[count],
     )

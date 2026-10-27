@@ -771,12 +771,17 @@ impl Session {
                         // extended-cue list on the write's own transaction
                         // — no bare success at all — and the deck draws a
                         // placed cue only once the source reflects it back
-                        // (F66, the rekordbox capture). Match that.
+                        // (F66, the rekordbox capture). The reply's request
+                        // kind is the WRITE'S OWN, not the fetch's: the
+                        // deck's cache-update path keys on it, and with the
+                        // fetch kind there the write confirms but never
+                        // caches (F66, the loop the reload lost).
                         match analysis::cue_points_ext(
                             transaction,
                             Some(&medium),
                             track,
                             &shared.cue_writes,
+                            MessageKind::CUE_WRITE,
                         ) {
                             Some(reply) => push(out, &reply),
                             None => push(out, &Message::success(transaction, kind, 0)),
