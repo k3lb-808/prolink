@@ -415,15 +415,20 @@ pub(super) fn cue_points_ext(
         rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
         rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
         rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
-        if ty == 2
-            && loop_ms != u32::MAX
-            && let Some(beats) = loop_beats(grid, time_ms, loop_ms)
-        {
-            // rekordbox's loops carry their length in beats (numerator at
-            // `0x42`, denominator 1 at `0x44`); a loop without them draws
-            // as a plain cue on the deck (F66).
-            rec[0x42..0x44].copy_from_slice(&beats.to_le_bytes());
-            rec[0x44..0x46].copy_from_slice(&1u16.to_le_bytes());
+        if ty == 2 {
+            // rekordbox's long loop entries carry `0x04` at `0x18` where a
+            // point carries zero — both the hot Outro loop and the memory
+            // loop of the F66 capture do — and a long loop without it drew
+            // as a plain cue (F66, the deck-2 check).
+            rec[0x18] = 0x04;
+            if loop_ms != u32::MAX
+                && let Some(beats) = loop_beats(grid, time_ms, loop_ms)
+            {
+                // …and their length in beats (numerator at `0x42`,
+                // denominator 1 at `0x44`).
+                rec[0x42..0x44].copy_from_slice(&beats.to_le_bytes());
+                rec[0x44..0x46].copy_from_slice(&1u16.to_le_bytes());
+            }
         }
         if hot_cue == 0 {
             // rekordbox's memory entries carry a 0-based list index and a
