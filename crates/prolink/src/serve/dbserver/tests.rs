@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use super::analysis::{apply_extended_overlay, apply_memory_overlay};
+use super::analysis::{apply_extended_overlay, apply_memory_overlay, loop_beats};
 use crate::serve::cue_writes::TrackOverlay;
 
 use prolink_proto::dbserver::{
@@ -2906,6 +2906,27 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
     };
     apply_memory_overlay(&mut memory, &removal);
     assert!(memory.is_empty(), "a removed hot cue leaves the list");
+}
+
+#[test]
+fn a_loop_serves_its_length_in_beats_from_the_grid() {
+    // rekordbox's loops carry numerator/denominator (F66: a three-grid-step
+    // loop served 3/1); ours computes the count from the beat grid the
+    // track carries.
+    let mut grid = Vec::new();
+    for beat in 0..64u16 {
+        let time = u32::from(beat) * 375; // 160 BPM
+        grid.extend_from_slice(&beat.to_be_bytes());
+        grid.extend_from_slice(&16_000u16.to_be_bytes());
+        grid.extend_from_slice(&time.to_be_bytes());
+    }
+    // The deck's own loop: 3426..4551 = 1125 ms = three grid steps.
+    assert_eq!(loop_beats(&grid, 3426, 4551), Some(3));
+    // One step loops are one beat; a sub-step loop rounds up to one.
+    assert_eq!(loop_beats(&grid, 750, 1125), Some(1));
+    assert_eq!(loop_beats(&grid, 100, 400), Some(1));
+    // And a track without a grid answers nothing to write.
+    assert_eq!(loop_beats(&[], 3426, 4551), None);
 }
 
 #[test]

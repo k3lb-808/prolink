@@ -329,6 +329,40 @@ pub(super) fn apply_extended_overlay(
     }
 }
 
+/// A loop's length in beats, from the track's beat grid: the interval the
+/// grid steps at around the loop's start, and the loop's span over it,
+/// rounded. rekordbox's own served loops carry the count (F66: a loop of
+/// three grid steps served numerator 3, denominator 1) and the deck draws
+/// the loop from it.
+pub(super) fn loop_beats(grid: &[u8], start_ms: u32, end_ms: u32) -> Option<u16> {
+    let times: Vec<u32> = grid
+        .chunks_exact(8)
+        .filter_map(|entry| match entry {
+            [_, _, _, _, time @ ..] => Some(u32::from_be_bytes(time.try_into().ok()?)),
+            _ => None,
+        })
+        .collect();
+    // The grid step that straddles the loop's start; past the grid's end,
+    // the step before the last beat.
+    let after = times.partition_point(|time| *time <= start_ms);
+    let interval = match (
+        after.checked_sub(1).and_then(|i| times.get(i)),
+        times.get(after),
+    ) {
+        (Some(previous), Some(next)) => next.checked_sub(*previous),
+        (Some(previous), None) => times
+            .len()
+            .checked_sub(2)
+            .and_then(|i| times.get(i))
+            .and_then(|earlier| previous.checked_sub(*earlier)),
+        (None, _) => return None,
+    }?
+    .max(1);
+    let span = end_ms.checked_sub(start_ms)?;
+    let beats = span.saturating_add(interval / 2) / interval;
+    u16::try_from(beats.max(1)).ok()
+}
+
 /// The extended-cue-points reply: one 136-byte record per cue.
 ///
 /// Ground truth in two rounds: our own records first (`82950a7`, "markers
@@ -359,6 +393,11 @@ pub(super) fn cue_points_ext(
     let overlay = cue_writes.overlay_for(medium.and_then(Medium::root), track_id);
     apply_extended_overlay(&mut all, &overlay);
     let count = all.len() as u32;
+    // The Arc binding keeps the parsed analysis alive under the slice.
+    let parsed = medium.map(|medium| medium.analysis(track_id));
+    let grid: &[u8] = parsed
+        .as_deref()
+        .map_or(&[], |analysis| analysis.payload(FourCc::PQTZ));
     let mut payload = Vec::with_capacity(all.len() * 136);
     let mut memory_index = 0u16;
     for (hot_cue, ty, time_ms, loop_ms, comment, row, cix, r, g, b) in all {
@@ -376,6 +415,16 @@ pub(super) fn cue_points_ext(
         rec[0x0c..0x10].copy_from_slice(&time_ms.to_le_bytes());
         rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
         rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
+        if ty == 2
+            && loop_ms != u32::MAX
+            && let Some(beats) = loop_beats(grid, time_ms, loop_ms)
+        {
+            // rekordbox's loops carry their length in beats (numerator at
+            // `0x42`, denominator 1 at `0x44`); a loop without them draws
+            // as a plain cue on the deck (F66).
+            rec[0x42..0x44].copy_from_slice(&beats.to_le_bytes());
+            rec[0x44..0x46].copy_from_slice(&1u16.to_le_bytes());
+        }
         if hot_cue == 0 {
             // rekordbox's memory entries carry a 0-based list index and a
             // 1-based id; the deck's own fresh cue rides id `0xffff` until
