@@ -71,6 +71,11 @@ fn push_txn() -> u32 {
     PUSH_TXN.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The transaction id for one unsolicited push, from the caller's side.
+pub(super) fn push_txn_pub() -> u32 {
+    push_txn()
+}
+
 /// The PWV6 tag and the artwork of one rendered track row, appended right
 /// after the footer of the render that drew it — exactly what the rekordbox
 /// capture pushes after a track list's menu items, per visible row, in row
@@ -338,7 +343,7 @@ pub(super) fn apply_extended_overlay(
           fixed-size buffer and the truncated wire fields never see a value that fits \
           nowhere"
 )]
-fn cue_points_ext(
+pub(super) fn cue_points_ext(
     transaction: u32,
     medium: Option<&Medium>,
     track_id: u32,
