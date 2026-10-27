@@ -2846,12 +2846,13 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
             220u32,
             u32::MAX,
             "intro".to_owned(),
+            0u8,
             0x2a,
             0xff,
             0,
             0,
         ),
-        (2, 1, 95220, u32::MAX, String::new(), 0, 0, 0, 0),
+        (2, 1, 95220, u32::MAX, String::new(), 0, 0, 0, 0, 0),
     ];
     let mut overlay = TrackOverlay::default();
     overlay.upserts.insert(1, cue_write_record(2110));
@@ -2863,14 +2864,18 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
     assert_eq!(extended[0].0, 1);
     assert_eq!(extended[0].2, 2110);
     assert_eq!(extended[0].4, "intro");
-    assert_eq!((extended[0].5, extended[0].6), (0x2a, 0xff));
+    assert_eq!(extended[0].5, 0, "the memory row the base never carried");
+    assert_eq!((extended[0].6, extended[0].7), (0x2a, 0xff));
     // A brand-new hot cue lands with its position and no colour of ours.
     let mut overlay = TrackOverlay::default();
     overlay.upserts.insert(5, cue_write_record(60000));
     apply_extended_overlay(&mut extended, &overlay);
     let fresh = extended.last().expect("the new cue appended");
     assert_eq!((fresh.0, fresh.2), (5, 60000));
-    assert_eq!((fresh.5, fresh.6, fresh.7, fresh.8), (0, 0, 0, 0));
+    assert_eq!(
+        (fresh.5, fresh.6, fresh.7, fresh.8, fresh.9),
+        (0, 0, 0, 0, 0)
+    );
     // The same overlay on the memory-point list.
     let mut memory = vec![prolink_proto::analysis::Cue {
         order: 0x100,
@@ -2911,9 +2916,9 @@ fn a_memory_cue_is_one_moved_slot_not_a_numbered_family() {
     // A remove clears the placement and the base list's entry at that
     // position.
     let base = vec![
-        (0u32, 1u8, 4040u32, u32::MAX, String::new(), 0, 0, 0, 0),
-        (0, 1, 77000, u32::MAX, String::new(), 0, 0, 0, 0),
-        (1, 1, 220, u32::MAX, "intro".to_owned(), 0, 0, 0, 0),
+        (0u32, 1u8, 4040u32, u32::MAX, String::new(), 0, 0, 0, 0, 0),
+        (0, 1, 77000, u32::MAX, String::new(), 0, 0, 0, 0, 0),
+        (1, 1, 220, u32::MAX, "intro".to_owned(), 0, 0, 0, 0, 0),
     ];
     let overlay = TrackOverlay {
         memory_cleared: [4040].into(),

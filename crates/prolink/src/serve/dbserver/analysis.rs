@@ -282,7 +282,7 @@ pub(super) fn reply(
 /// one working memory cue lands at its position unless that position was
 /// cleared; base memory entries at cleared positions drop.
 pub(super) fn apply_extended_overlay(
-    all: &mut Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8)>,
+    all: &mut Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8, u8)>,
     overlay: &TrackOverlay,
 ) {
     all.retain(|(pad, _, time_ms, ..)| {
@@ -304,7 +304,7 @@ pub(super) fn apply_extended_overlay(
                 // The write record's own colour tail is the one part of it
                 // nobody has decoded; a brand-new cue lands uncoloured until
                 // that read is settled (F65).
-                all.push((pad, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0));
+                all.push((pad, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0, 0));
             }
         }
     }
@@ -317,7 +317,7 @@ pub(super) fn apply_extended_overlay(
             .find(|entry| entry.0 == 0 && entry.2 == time_ms)
         {
             Some(entry) => entry.3 = loop_ms,
-            None => all.push((0, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0)),
+            None => all.push((0, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0, 0)),
         }
     }
 }
@@ -349,7 +349,7 @@ fn cue_points_ext(
     apply_extended_overlay(&mut all, &overlay);
     let count = all.len() as u32;
     let mut payload = Vec::with_capacity(all.len() * 136);
-    for (hot_cue, ty, time_ms, loop_ms, comment, cix, r, g, b) in all {
+    for (hot_cue, ty, time_ms, loop_ms, comment, row, cix, r, g, b) in all {
         let bytes: Vec<u8> = comment
             .encode_utf16()
             .chain([0u16])
@@ -357,6 +357,11 @@ fn cue_points_ext(
             .collect();
         let mut rec = vec![0u8; 136];
         rec[0x00..0x04].copy_from_slice(&136u32.to_le_bytes());
+        // The memory-cue colour row (the PCP2 file's byte 28) rides the base
+        // fields at the same relative spot; nobody has caught a real deck's
+        // list carrying one, so both candidate spots get it — a stray row id
+        // in an ignored position costs nothing (F66).
+        rec[0x14] = row;
         rec[0x04..0x06].copy_from_slice(&(hot_cue as u16).to_le_bytes());
         let is_loop = ty == 2;
         rec[0x06..0x08].copy_from_slice(&(if is_loop { 2u16 } else { 1u16 }).to_le_bytes());
@@ -369,9 +374,16 @@ fn cue_points_ext(
         let tail = 0x4a + bytes.len();
         rec[tail..tail + 4].copy_from_slice(&0x2cu32.to_le_bytes());
         // The cue's own colour as rekordbox's PCO2/PCP2 record carries
-        // it: [colour index][R][G][B]; fall back to the ground-truth
-        // palette cycle when the medium records none.
-        let colour = if r == 0 && g == 0 && b == 0 && cix == 0 {
+        // it: [colour index][R][G][B]. A memory cue's arrow follows its
+        // colour row, so the row id leads; the deck-written default was
+        // read as an out-of-table row and drew black (F66), so a memory
+        // cue with no row of its own lands on row 2, the red pad. Hot
+        // cues keep the ground-truth palette cycle when the medium
+        // records none.
+        let colour = if hot_cue == 0 {
+            let row = if row == 0 { 2 } else { row };
+            [row, r, g, b]
+        } else if r == 0 && g == 0 && b == 0 && cix == 0 {
             let palette: [[u8; 4]; 4] = [
                 [0x2a, 0xff, 0x00, 0x00],
                 [0x38, 0xb3, 0x00, 0xff],
@@ -689,11 +701,12 @@ fn cues(medium: Option<&Medium>, track_id: u32) -> Vec<Cue> {
 }
 
 /// A track's extended cues with per-record comment and colour, from the
-/// PCO2 PCP2 lists: .
+/// PCO2 PCP2 lists: the memory-cue colour row rides beside the hot pad
+/// colour so the arrow a deck draws can follow the row the DJ chose.
 fn extended(
     medium: Option<&Medium>,
     track_id: u32,
-) -> Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8)> {
+) -> Vec<(u32, u8, u32, u32, String, u8, u8, u8, u8, u8)> {
     let Some(medium) = medium else {
         return Vec::new();
     };
@@ -717,6 +730,7 @@ fn extended(
                 cue.time,
                 cue.loop_time,
                 cue.comment.clone(),
+                cue.color_id,
                 cue.hot_cue_color_index,
                 cue.hot_cue_color_red,
                 cue.hot_cue_color_green,
