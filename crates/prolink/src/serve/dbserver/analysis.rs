@@ -385,10 +385,9 @@ pub(super) fn loop_beats(grid: &[u8], start_ms: u32, end_ms: u32) -> Option<u16>
     clippy::indexing_slicing,
     clippy::as_conversions,
     clippy::cast_possible_truncation,
-    clippy::too_many_lines,
     reason = "the ground-truth 136-byte cue record: offsets are constants inside the \
           fixed-size buffer and the truncated wire fields never see a value that fits \
-          nowhere; the served-bytes diagnostics (F66) read the record back out"
+          nowhere"
 )]
 pub(super) fn cue_points_ext(
     transaction: u32,
@@ -401,8 +400,8 @@ pub(super) fn cue_points_ext(
     let overlay = cue_writes.overlay_for(medium.and_then(Medium::root), track_id);
     apply_extended_overlay(&mut all, &overlay);
     let count = all.len() as u32;
-    // What this reply carries, entry by entry: the only way to argue about
-    // a loop the deck drew as a point is to see the list we served (F66).
+    // What this reply carries, entry by entry: the cheap way to see the
+    // list we served when a deck renders it differently than we meant (F66).
     tracing::debug!(
         track_id,
         entries = %all
@@ -507,17 +506,6 @@ pub(super) fn cue_points_ext(
         }
         payload.extend_from_slice(&rec);
     }
-    // The raw bytes of any loop, for arguing with the deck's renderer (F66).
-    let loops = payload
-        .chunks(136)
-        .filter(|rec| rec.get(0x06..0x08).is_some_and(|t| *t != [0, 1]))
-        .map(|rec| {
-            rec.iter()
-                .fold(String::new(), |acc, b| format!("{acc}{b:02x}"))
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    tracing::debug!(track_id, loops = %loops, "the loop records served");
     Message::binary_reply(
         transaction,
         MessageKind::CUE_POINTS_EXT,
