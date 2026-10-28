@@ -55,6 +55,7 @@ Status key: `todo` · `wip` · `done` · `blocked` · `dropped`
 | 41 | Player 2: symmetric by audit, confirmed by a hands-on session; loads now logged. Cue write-back: no ground truth anywhere, evidence-blocked | done / blocked on evidence | [041](041-player-2-and-cue-write-back.md) |
 | 42 | Behaviour tests: the announce trigger and the short-source answer extracted and tested; claim gating already covered | done | [042](042-behaviour-tests.md) |
 | 43 | Cue write-back: `0x2705` decoded from the live capture, the sidecar overlay store, both cue replies overlaid | done, on-deck verify open | [043](043-cue-write-back.md); F65 |
+| 44 | Loops and memory cues (F66): the ack is the refreshed list on the write's own kind, memory cues accumulate per position, loops are orange | done | [044](044-loops-and-memory-cues.md); F66 |
 
 ## Acceptance: what the CLI must be able to do
 
@@ -100,6 +101,18 @@ a real CDJ, and these are the places where that matters most:
 ## Decisions taken along the way
 
 Recorded here so they do not have to be re-derived.
+
+- **F66: the write ack is the refreshed cue list on the write's own
+  transaction, with the write's own kind as the reply's request field.**
+  A bare success leaves the deck holding a cue it never draws; the fetch
+  kind confirms the write but never updates the deck's per-track cache.
+- **F66: the deck re-reads a track's cue list once per power cycle.**
+  Reloads ride the cache; a source that wants its cues seen must be right
+  at fetch time or update the cache through the write acks.
+- **F66: a fresh boot with two rekordbox-class sources stalls the deck's
+  browser.** Boot with one; the second can join afterwards.
+- **F66: loop pads are orange.** Rekordbox serves its loops
+  `[0x24][255][140][0]`; anything else reads as a plain cue marker.
 
 | Decision | Where |
 |---|---|
