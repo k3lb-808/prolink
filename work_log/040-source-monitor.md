@@ -37,7 +37,7 @@ The open question read: "the ephemeral-port-bound `0x16`s rekordbox sends
 during active browsing (~1.4/s) — replies to something we have not
 identified". Re-measured: every `0x16` in both long ground truths goes
 `:50002` → `:50002` (rekordbox's source port to the deck's status port), six
-of them to palme's own listener during the original capture. No announce in
+of them to the server's own listener during the original capture. No announce in
 the archived data is bound to an ephemeral port, and rekordbox announces
 nine times in hours, not 1.4/s. The `~1.4/s` figure matches *our* announce
 trigger under active browsing (687 announces in `az_wire_new2` over 8.2
