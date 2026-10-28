@@ -447,11 +447,13 @@ pub(super) fn cue_points_ext(
         rec[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
         rec[0x34..0x38].copy_from_slice(&0x4eu32.to_le_bytes());
         if ty == 2 {
-            // rekordbox's long loop entries carry `0x04` at `0x18` where a
-            // point carries zero — both the hot Outro loop and the memory
-            // loop of the F66 capture do — and a long loop without it drew
-            // as a plain cue (F66, the deck-2 check).
+            // rekordbox's long loop entries carry `0x04` at `0x18` and
+            // `0x06` at `0x3a` where a point carries zero — the hot Outro
+            // loop and the memory loop of the F66 captures both do — and a
+            // long loop without them drew as a plain cue (F66, the deck-2
+            // check and the served-bytes diff).
             rec[0x18] = 0x04;
+            rec[0x3a] = 0x06;
             if loop_ms != u32::MAX
                 && let Some(beats) = loop_beats(grid, time_ms, loop_ms)
             {
