@@ -2281,7 +2281,7 @@ mod tests {
         // packet must stay byte-equal to rekordbox's own broadcast save the
         // name and the two number slots.
         let mut packet = VirtualCdj::SOURCE_STATUS;
-        let name = DeviceName::new("palme");
+        let name = DeviceName::new("deck");
         packet[11..31].copy_from_slice(&name.0);
         packet[33] = 41;
         packet[36] = 41;
@@ -2342,7 +2342,7 @@ mod tests {
     /// the short response, in the boot capture's order.
     #[test]
     fn the_short_source_answer_is_three_announces_then_the_response() {
-        let name = DeviceName::new("palme");
+        let name = DeviceName::new("deck");
         let ours = DeviceNumber::new(0x29).expect("41 is a device number");
         let answers = short_source_answers(name, ours);
         assert_eq!(answers.len(), 4);
