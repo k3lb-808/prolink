@@ -486,7 +486,13 @@ pub(super) fn cue_points_ext(
         // black (F66). Hot cues keep the ground-truth palette cycle when
         // the medium records none.
         if hot_cue != 0 {
-            let colour = if r == 0 && g == 0 && b == 0 && cix == 0 {
+            // A loop's pad is orange, always — rekordbox serves its loops
+            // `[0x24][255][140][0]` (F66) and the deck draws them so; our
+            // section/palette colours on a loop read as a plain cue, which
+            // is exactly how today's loops hid in plain sight.
+            let colour = if ty == 2 {
+                [0x24, 0xff, 0x8c, 0x00]
+            } else if r == 0 && g == 0 && b == 0 && cix == 0 {
                 let palette: [[u8; 4]; 4] = [
                     [0x2a, 0xff, 0x00, 0x00],
                     [0x38, 0xb3, 0x00, 0xff],
