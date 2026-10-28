@@ -298,8 +298,20 @@ impl Dispatcher {
                 portmap::Response::GetPort(port).encode()
             }
             portmap::Request::Dump => portmap::Response::Dump(
-                portmap::cdj_registrations(self.ports.portmap, self.ports.mount, self.ports.nfs)
-                    .to_vec(),
+                portmap::cdj_registrations(
+                    // Several portmappers may be bound (both generations'
+                    // ports); the self-registration names the first of them.
+                    // A deck never asks a portmapper for the portmapper
+                    // itself (F46's corpus), so the choice is cosmetic.
+                    self.ports
+                        .portmaps
+                        .first()
+                        .copied()
+                        .unwrap_or(portmap::PORT),
+                    self.ports.mount,
+                    self.ports.nfs,
+                )
+                .to_vec(),
             )
             .encode(),
             // `SET` and `UNSET` land here. A remote caller has no business
@@ -637,7 +649,7 @@ impl Ports {
     /// `None` encodes to the wire's zero — "that program is not registered" —
     /// which is a successful reply rather than an error, and needs no special
     /// case for a program we do not run.
-    fn serving(self, mapping: portmap::Mapping) -> Option<u16> {
+    fn serving(&self, mapping: portmap::Mapping) -> Option<u16> {
         if mapping.protocol != IpProtocol::UDP {
             // Nothing in Pro DJ Link's RPC is on TCP, and answering a port we
             // do not listen on there would send a player somewhere silent.
@@ -646,7 +658,12 @@ impl Ports {
         match (mapping.program, mapping.version) {
             (Program::MOUNT, mount::VERSION) => Some(self.mount),
             (Program::NFS, nfs2::VERSION) => Some(self.nfs),
-            (Program::PORTMAP, portmap::VERSION) => Some(self.portmap),
+            // Several portmappers may be bound; a deck never asks a
+            // portmapper for the portmapper itself (F46's corpus), so the
+            // first bound port is the whole story.
+            (Program::PORTMAP, portmap::VERSION) => {
+                Some(self.portmaps.first().copied().unwrap_or(portmap::PORT))
+            }
             _ => None,
         }
     }
@@ -658,11 +675,13 @@ mod tests {
 
     use prolink_proto::rpc::Xid;
 
-    const PORTS: Ports = Ports {
-        portmap: portmap::PORT,
-        mount: mount::PIONEER_PORT,
-        nfs: nfs2::PORT,
-    };
+    fn ports() -> Ports {
+        Ports {
+            portmaps: vec![portmap::PORT],
+            mount: mount::PIONEER_PORT,
+            nfs: nfs2::PORT,
+        }
+    }
 
     const PEER: Ipv4Addr = Ipv4Addr::new(169, 254, 202, 84);
 
@@ -679,14 +698,14 @@ mod tests {
             "/C/Contents/\u{30ab}\u{3099}\u{30ab}\u{3099}\u{30df}.mp3",
             b"nfd".to_vec(),
         );
-        Dispatcher::new(Arc::new(RwLock::new(vfs)), PORTS)
+        Dispatcher::new(Arc::new(RwLock::new(vfs)), ports())
     }
 
     fn both_slots() -> Dispatcher {
         let mut vfs = Vfs::new();
         vfs.add_file("/C/PIONEER/rekordbox/export.pdb", b"usb".to_vec());
         vfs.add_file("/B/PIONEER/rekordbox/export.pdb", b"sd".to_vec());
-        Dispatcher::new(Arc::new(RwLock::new(vfs)), PORTS)
+        Dispatcher::new(Arc::new(RwLock::new(vfs)), ports())
     }
 
     /// Decode a hex literal, ignoring whitespace so a captured datagram can be
@@ -1553,7 +1572,7 @@ mod tests {
         drop(file);
         let mut vfs = Vfs::new();
         vfs.mount("C", &root).unwrap();
-        let dispatcher = Dispatcher::new(Arc::new(RwLock::new(vfs)), PORTS);
+        let dispatcher = Dispatcher::new(Arc::new(RwLock::new(vfs)), ports());
 
         let compare = |path: &str, captured: &str, what: &str| {
             let handle = handle(path);
@@ -1611,7 +1630,7 @@ mod tests {
 
         let mut vfs = Vfs::new();
         vfs.mount("C", &root).unwrap();
-        let dispatcher = Dispatcher::new(Arc::new(RwLock::new(vfs)), PORTS);
+        let dispatcher = Dispatcher::new(Arc::new(RwLock::new(vfs)), ports());
         let response = nfs(&dispatcher, &nfs2::Request::GetAttr(handle("/C/huge.wav")));
         assert_eq!(status(&response), Status::FBIG);
         let read = nfs(

@@ -225,10 +225,11 @@ enum Command {
         #[arg(long, default_value_t = 0x00, value_parser = maybe_hex)]
         generation: u8,
 
-        /// Put the portmapper somewhere else. Useful only for experiments: at
-        /// anything but 111 no real player will ever find us.
-        #[arg(long, default_value_t = 111)]
-        portmap_port: u16,
+        /// Bind exactly one portmapper port instead of both generations' —
+        /// the default binds 111 and 50111, listing the source to every
+        /// current deck generation at once.
+        #[arg(long)]
+        portmap_port: Option<u16>,
 
         /// The waveform colour the settings answer names. A deck asks for the
         /// settings at every boot and renders what the answer names.
@@ -628,7 +629,7 @@ async fn serve(
     println!("announcing as device {}", server.device_number());
     println!(
         "portmap {} · mountd {} · nfsd {} · dbserver {}",
-        ports.portmap,
+        ports.portmaps.first().copied().unwrap_or(0),
         ports.mount,
         ports.nfs,
         server.dbserver_port(),

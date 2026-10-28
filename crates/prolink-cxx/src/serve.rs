@@ -127,7 +127,7 @@ pub(crate) fn describe(player: &VirtualPlayer, interface: String, address: Strin
         device_number: player.device_number().get(),
         address,
         interface,
-        portmap_port: ports.portmap,
+        portmap_port: ports.portmaps.first().copied().unwrap_or(0),
         mount_port: ports.mount,
         nfs_port: ports.nfs,
         dbserver_port: player.dbserver_port(),

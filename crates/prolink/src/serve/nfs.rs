@@ -26,18 +26,21 @@
 //! That failure does not look like a file-access failure. It looks like "we do
 //! not appear on LINK", and the entire browse path is downstream of it. So the
 //! portmapper is bound **last** — after the two ports that cannot fail for want
-//! of privilege — and failing to bind it is [`Error::PrivilegedPort`], an error
-//! carrying what a user can do about it on this platform, rather than a warning
-//! in a log nobody reads. Linux can be told
-//! `net.ipv4.ip_unprivileged_port_start=111`; macOS cannot serve 111 without
-//! elevation at all.
+//! of privilege — and a portmapper that was explicitly asked for (`portmap_port`
+//! set) but could not be bound is [`Error::PrivilegedPort`], an error carrying
+//! what a user can do about it on this platform, rather than a warning in a log
+//! nobody reads. Linux can be told `net.ipv4.ip_unprivileged_port_start=111`;
+//! macOS cannot serve 111 without elevation at all.
 //!
-//! Asking for a portmapper anywhere else — which is what a `portmap_port` other
-//! than 111 means — is allowed: it is how the fallback question was settled
-//! experimentally, and how the AZ generation is served at all, since its decks
-//! probe 50111 there. [`Ports::is_discoverable_for`] is what a caller should
-//! check before believing it is browsable; it knows which port the generation
-//! looks on.
+//! The generations look on different ports — the old one asks 111 (F46), the
+//! AZ's rekordbox-class sources probe 50111 — so the default serve binds
+//! **both** portmapper ports at once and lists itself on each. `portmap_port`
+//! overrides that: a `Some(port)` serves exactly one portmapper there, and
+//! failing to bind it is fatal. The default's 111 bind degrades gracefully —
+//! without privilege Linux refuses it, macOS without elevation too — so serving
+//! only 50111 in that case is a `[WARN]`, named in the log, not a hard stop.
+//! [`Ports::is_discoverable_for`] is what a caller should check before
+//! believing it is browsable; it knows which port the generation looks on.
 //!
 //! All three binds are **exclusive**. Everywhere else in this crate a port is
 //! shared, because a DJ will have rekordbox open and both of us only listen;
@@ -139,11 +142,11 @@ const ALREADY_HELD: &str = "another RPC server already holds it — on Linux tha
                             some of a player's calls";
 
 /// Where the three servers are answering.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Ports {
-    /// The portmapper. 111 for the old generation, 50111 for the AZ's
-    /// rekordbox-class sources.
-    pub portmap: u16,
+    /// The bound portmapper ports: 111 for the old generations, 50111 for
+    /// the AZ's rekordbox-class sources — both when both could be bound.
+    pub portmaps: Vec<u16>,
     /// mountd. 48276 when it was free.
     pub mount: u16,
     /// nfsd. 2049 when it was free.
@@ -155,10 +158,9 @@ impl Ports {
     ///
     /// False means the portmapper is not on 111, and an old deck will retry
     /// `GETPORT` for ever rather than fall back to the well-known ports (F46) —
-    /// so everything else here is bound, correct and unreachable. The AZ
-    /// generation is different: see [`Self::is_discoverable_for`].
+    /// so everything else here is bound, correct and unreachable.
     pub fn is_discoverable(&self) -> bool {
-        self.portmap == portmap::PORT
+        self.portmaps.contains(&portmap::PORT)
     }
 
     /// Whether `kind`'s generation can find these.
@@ -167,10 +169,15 @@ impl Ports {
     /// probes a rekordbox-class source's portmapper on 50111 — where it listed
     /// us through the whole serving effort, privilege-free.
     pub fn is_discoverable_for(&self, kind: DeviceKind) -> bool {
+        self.portmaps.contains(&Self::portmap_for(kind))
+    }
+
+    /// The portmapper port `kind`'s generation probes.
+    fn portmap_for(kind: DeviceKind) -> u16 {
         if kind == DeviceKind::REKORDBOX_OR_CDJ3000 {
-            self.portmap == portmap::AZ_PORT
+            portmap::AZ_PORT
         } else {
-            self.portmap == portmap::PORT
+            portmap::PORT
         }
     }
 }
@@ -184,9 +191,14 @@ pub struct NfsConfig {
     /// and for a single-homed host. Link-local has no default route, so on a
     /// multi-homed host this is what keeps replies going out the way they came.
     pub interface: Option<Interface>,
-    /// Where to put the portmapper. Anything but 111 makes us invisible to real
-    /// hardware, and is useful only for tests and experiments.
-    pub portmap_port: u16,
+    /// Bind exactly one portmapper port, instead of both generations'.
+    ///
+    /// `None` — the default — binds 111 and 50111, so a source lists itself
+    /// to every current deck generation at once. 111 needs the privilege and
+    /// its failure is a warning with the remedy; 50111 binds without. A
+    /// single port is the escape hatch for tests, port conflicts and
+    /// experiments: the bind failure stays fatal there.
+    pub portmap_port: Option<u16>,
     /// Preferred mountd port; an ephemeral one is used if it is taken.
     pub mount_port: u16,
     /// Preferred nfsd port; an ephemeral one is used if it is taken.
@@ -197,7 +209,7 @@ impl Default for NfsConfig {
     fn default() -> Self {
         Self {
             interface: None,
-            portmap_port: portmap::PORT,
+            portmap_port: None,
             mount_port: mount::PIONEER_PORT,
             nfs_port: nfs2::PORT,
         }
@@ -234,52 +246,89 @@ impl NfsServer {
         // nothing for a portmapper to publish, and finding that out is cheap.
         let (nfs, nfs_port) = bind_preferred(config.nfs_port, interface, "nfsd")?;
         let (mount, mount_port) = bind_preferred(config.mount_port, interface, "mountd")?;
-        // And 111 last, because it is the only one that can fail for want of
-        // privilege and the only one whose failure is worth an error.
-        let portmap = bind_portmapper(config.portmap_port, interface)?;
-        let portmap_port = port_of(&portmap)?;
+        // And the portmapper last, because it is the only one that can fail
+        // for want of privilege. The default binds both generations' ports so
+        // a source lists itself to every deck at once: 111 needs the
+        // privilege and its failure is a warning — the decks probing it will
+        // not see us, and the remedy says what to do — while 50111 binds
+        // without. A configured single port keeps the old all-or-nothing
+        // error, which is what tests and port conflicts want.
+        let candidates = match config.portmap_port {
+            Some(port) => vec![port],
+            None => vec![portmap::PORT, portmap::AZ_PORT],
+        };
+        let mut portmap_sockets = Vec::new();
+        let mut last_error = None;
+        for port in candidates {
+            match bind_portmapper(port, interface) {
+                Ok(socket) => {
+                    // The bound port, not the requested one: a request of 0
+                    // binds an ephemeral port and publishes what it got.
+                    let bound = port_of(&socket)?;
+                    portmap_sockets.push((socket, bound));
+                }
+                Err(error) if config.portmap_port.is_some() => return Err(error),
+                Err(error) => {
+                    warn!(
+                        port,
+                        error = %error,
+                        "a portmapper port could not be bound; decks probing it will not see us"
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        if portmap_sockets.is_empty() {
+            return Err(last_error.unwrap_or_else(|| {
+                (Error::io("no portmapper port could be bound"))(std::io::Error::other(
+                    "every portmapper bind failed",
+                ))
+            }));
+        }
+        let portmaps = portmap_sockets
+            .iter()
+            .map(|(_, port)| *port)
+            .collect::<Vec<_>>();
 
         let ports = Ports {
-            portmap: portmap_port,
+            portmaps,
             mount: mount_port,
             nfs: nfs_port,
         };
         info!(
-            portmap = ports.portmap,
+            portmaps = ?ports.portmaps,
             mount = ports.mount,
             nfs = ports.nfs,
             "serving files",
         );
-        if ports.portmap != portmap::PORT {
-            // Whether that is a problem depends on the generation: an old
-            // player only looks on 111, the AZ probes 50111. The callers know
-            // the kind and warn kind-aware; here the fact is all we can state.
+        if !ports.is_discoverable() {
             debug!(
-                portmap = ports.portmap,
+                portmaps = ?ports.portmaps,
                 "the portmapper is not on the old generation's 111 (F46)"
             );
         }
 
-        let dispatcher = Arc::new(Dispatcher::new(vfs, ports));
+        let dispatcher = Arc::new(Dispatcher::new(vfs, ports.clone()));
         let limit = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
-        let tasks = [
-            (portmap, Service::Portmap),
-            (mount, Service::Mount),
-            (nfs, Service::Nfs),
-        ]
-        .into_iter()
-        .map(|(socket, service)| {
-            listen(
-                Arc::new(socket),
-                service,
-                Arc::clone(&dispatcher),
-                Arc::clone(&limit),
+        let tasks = portmap_sockets
+            .into_iter()
+            .map(|(socket, _)| (socket, Service::Portmap))
+            .chain(
+                std::iter::once((mount, Service::Mount))
+                    .chain(std::iter::once((nfs, Service::Nfs))),
             )
-        })
-        .collect();
+            .map(|(socket, service)| {
+                listen(
+                    Arc::new(socket),
+                    service,
+                    Arc::clone(&dispatcher),
+                    Arc::clone(&limit),
+                )
+            })
+            .collect::<Vec<_>>();
 
         Ok(Self {
-            ports,
+            ports: ports.clone(),
             dispatcher,
             tasks,
         })
@@ -287,7 +336,7 @@ impl NfsServer {
 
     /// Where the three servers ended up.
     pub fn ports(&self) -> Ports {
-        self.ports
+        self.ports.clone()
     }
 
     /// The exports peers currently hold open, most recently mounted last.
@@ -450,7 +499,7 @@ mod tests {
     fn ephemeral() -> NfsConfig {
         NfsConfig {
             interface: None,
-            portmap_port: 0,
+            portmap_port: Some(0),
             mount_port: 0,
             nfs_port: 0,
         }
@@ -531,7 +580,7 @@ mod tests {
             .encode_arguments(),
             1,
         );
-        let reply = round_trip(&client, ports.portmap, &getport).await;
+        let reply = round_trip(&client, ports.portmaps[0], &getport).await;
         assert_eq!(
             portmap::Response::parse(portmap::Proc::GETPORT, &results(&reply)).unwrap(),
             portmap::Response::GetPort(Some(ports.mount)),
@@ -658,7 +707,7 @@ mod tests {
             .expect("the first server starts");
         let held = NfsConfig {
             interface: None,
-            portmap_port: first.ports().portmap,
+            portmap_port: Some(first.ports().portmaps[0]),
             mount_port: first.ports().mount,
             nfs_port: first.ports().nfs,
         };
@@ -703,11 +752,11 @@ mod tests {
     fn the_defaults_are_the_numbers_a_cdj_publishes() {
         // F10's `rpcinfo` output, which is what we impersonate.
         let config = NfsConfig::default();
-        assert_eq!(config.portmap_port, 111);
+        assert_eq!(config.portmap_port, None);
         assert_eq!(config.mount_port, 48276);
         assert_eq!(config.nfs_port, 2049);
         let on_111 = Ports {
-            portmap: 111,
+            portmaps: vec![111],
             mount: 48276,
             nfs: 2049,
         };
@@ -717,7 +766,7 @@ mod tests {
         assert!(on_111.is_discoverable_for(DeviceKind::CDJ));
         assert!(!on_111.is_discoverable_for(DeviceKind::REKORDBOX_OR_CDJ3000));
         let on_50111 = Ports {
-            portmap: portmap::AZ_PORT,
+            portmaps: vec![portmap::AZ_PORT],
             mount: 48276,
             nfs: 2049,
         };

@@ -73,7 +73,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 fn ephemeral() -> NfsConfig {
     NfsConfig {
         interface: None,
-        portmap_port: 0,
+        portmap_port: Some(0),
         mount_port: 0,
         nfs_port: 0,
     }
@@ -201,7 +201,7 @@ async fn captured_calls_replay_over_sockets() {
     let server = NfsServer::start(vfs, ephemeral()).await.expect("start");
     let client = UdpSocket::bind("127.0.0.1:0").await.expect("a client");
 
-    let reply = round_trip(&client, server.ports().portmap, &getport).await;
+    let reply = round_trip(&client, server.ports().portmaps[0], &getport).await;
     assert_eq!(
         portmap::Response::parse(portmap::Proc::GETPORT, &results(&reply)).unwrap(),
         portmap::Response::GetPort(Some(server.ports().mount)),
@@ -690,9 +690,9 @@ fn re_aim(datagram: &[u8], ours: &BTreeMap<FileHandleKey, FileHandle>) -> Option
     )
 }
 
-fn port_for(ports: Ports, program: Program) -> u16 {
+fn port_for(ports: &Ports, program: Program) -> u16 {
     match program {
-        Program::PORTMAP => ports.portmap,
+        Program::PORTMAP => ports.portmaps[0],
         Program::MOUNT => ports.mount,
         _ => ports.nfs,
     }
@@ -735,7 +735,7 @@ async fn replay(
             continue;
         };
 
-        let port = port_for(server.ports(), replayed.program);
+        let port = port_for(&server.ports(), replayed.program);
         let reply = round_trip(&client, port, &datagram).await;
         census.replayed += 1;
         let parsed = Reply::parse(&reply).expect("every call gets a well-formed reply");
@@ -745,7 +745,7 @@ async fn replay(
             .to_vec();
 
         match replayed.program {
-            Program::PORTMAP => check_portmap(replayed, &results, server.ports()),
+            Program::PORTMAP => check_portmap(replayed, &results, &server.ports()),
             Program::MOUNT => check_mount(replayed, &results, census),
             _ => check_nfs(replayed, &results, census),
         }
@@ -780,7 +780,7 @@ fn describe(replayed: &Replayed) -> String {
     }
 }
 
-fn check_portmap(replayed: &Replayed, results: &[u8], ports: Ports) {
+fn check_portmap(replayed: &Replayed, results: &[u8], ports: &Ports) {
     let procedure = portmap::Proc(replayed.procedure);
     let Ok(answer) = portmap::Response::parse(procedure, results) else {
         panic!("our portmap reply must decode: {}", describe(replayed));
@@ -797,7 +797,7 @@ fn check_portmap(replayed: &Replayed, results: &[u8], ports: Ports) {
         let expected = match (asked.program, asked.version) {
             (Program::MOUNT, 1) => Some(ports.mount),
             (Program::NFS, 2) => Some(ports.nfs),
-            (Program::PORTMAP, 2) => Some(ports.portmap),
+            (Program::PORTMAP, 2) => Some(ports.portmaps[0]),
             _ => None,
         }
         .filter(|_| asked.protocol == prolink_proto::rpc::IpProtocol::UDP);

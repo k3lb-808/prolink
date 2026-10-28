@@ -509,14 +509,14 @@ async fn serve_files(root: &Path) -> (NfsServer, u16) {
             interface: None,
             // Ephemeral throughout: nothing here needs root. Against hardware
             // the portmapper must be on 111 or a deck never looks (F46).
-            portmap_port: 0,
+            portmap_port: Some(0),
             mount_port: 0,
             nfs_port: 0,
         },
     )
     .await
     .expect("the file servers start");
-    let portmap = server.ports().portmap;
+    let portmap = server.ports().portmaps[0];
     (server, portmap)
 }
 
@@ -958,7 +958,7 @@ async fn a_plain_stick_is_browsed_and_read_the_way_a_cdj_reads_one() {
         Arc::new(RwLock::new(tree)),
         ServerNfsConfig {
             interface: None,
-            portmap_port: 0,
+            portmap_port: Some(0),
             mount_port: 0,
             nfs_port: 0,
         },
@@ -969,7 +969,7 @@ async fn a_plain_stick_is_browsed_and_read_the_way_a_cdj_reads_one() {
         LOOPBACK,
         None,
         prolink::consume::NfsConfig {
-            portmap_port: files.ports().portmap,
+            portmap_port: files.ports().portmaps[0],
             ..Default::default()
         },
     )

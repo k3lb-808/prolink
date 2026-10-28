@@ -516,11 +516,13 @@ pub mod ffi {
         address: String,
         /// The interface we serve on.
         interface: String,
-        /// Where the portmapper is listening.
+        /// Where the portmapper is listening: the first bound port.
         ///
-        /// **Must be 111.** With nothing there a deck retries `GETPORT` once a
-        /// second for ever rather than falling back to the well-known ports,
-        /// and never reaches the dbserver at all (F46).
+        /// The server binds both generations' ports (111 and 50111) when it
+        /// can; this names the first of them. Zero when none bound — with
+        /// nothing on a generation's port a deck retries `GETPORT` for ever
+        /// rather than falling back to the well-known ports, and never
+        /// reaches the dbserver at all (F46).
         portmap_port: u16,
         /// Where mountd is listening.
         mount_port: u16,

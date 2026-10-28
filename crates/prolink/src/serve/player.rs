@@ -69,7 +69,7 @@ pub struct VirtualPlayerConfig {
     pub generation: u8,
     /// Where to put the portmapper. Anything but 111 makes us invisible to real
     /// hardware and is useful only for tests.
-    pub portmap_port: u16,
+    pub portmap_port: Option<u16>,
     /// The waveform colour the settings answer names.
     pub waveform_color: prolink_proto::status::WaveformColor,
 }
@@ -83,7 +83,7 @@ impl VirtualPlayerConfig {
             name: DeviceName::default(),
             kind: DeviceKind::CDJ,
             generation: 0x00,
-            portmap_port: prolink_proto::rpc::portmap::PORT,
+            portmap_port: None,
             waveform_color: prolink_proto::status::WaveformColor::ThreeBand,
         }
     }
@@ -395,7 +395,7 @@ impl VirtualPlayer {
         .await?;
         if !nfs.ports().is_discoverable_for(config.kind) {
             warn!(
-                portmap = nfs.ports().portmap,
+                portmaps = ?nfs.ports().portmaps,
                 kind = ?config.kind,
                 "the portmapper is not where this generation probes; a real player will retry \
                  GETPORT for ever and never find us"
