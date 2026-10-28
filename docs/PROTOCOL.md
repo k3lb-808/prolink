@@ -892,6 +892,39 @@ PWV2 PCOB`; `.EXT` adds `PWV3 PCO2 PQT2 PWV5 PWV4 PSSI`.
 To *serve* these you must transform them (§5.11). To *consume* them you need the
 interpretation instead.
 
+#### Writing them back — the splice contract *(confirmed on hardware, F67)*
+
+When a deck edits cues on a stick it holds in its own USB port, it rewrites
+that track's `ANLZ0000.DAT` and `.EXT` in place — **and nothing else**. No
+database changes: `export.pdb`, `exportLibrary.db` and `exportExt.pdb` keep
+their bytes across a session of cue edits (hashes compared before and after,
+F67). The databases are not where a deck's cue truth lives; the ANLZ files
+are, in both directions — a deck also *displays* cues read from these files
+when the databases carry none.
+
+The shapes the deck writes, which the splicer in `serve/splice.rs` mirrors:
+
+- The `.DAT`'s `PCOB` lists (one per flavour) carry the cues as fixed 56-byte
+  `PCPT` entries: hot cue number, status 0, sort words `0xffff`, the type
+  byte, the `0x00 0x03 0xe8` unknown, position in ms, loop end (`0xffff_ffff`
+  for a point), and a 16-byte tail of `0xff`.
+- The `.EXT`'s `PCO2` lists (one per flavour) carry the same cues as compact
+  44-byte `PCP2` entries — no comment, no colour — and the `.EXT`'s own
+  `PCOB` lists sit **empty**: the deck normalises to that shape on its first
+  edit, keeping the tags but emptying them.
+- List headers ride before the entries: a `PCOB`'s is twelve bytes (flavour,
+  pad, count, a trailing word that varies — `0x0` on a memory list,
+  `0xffff_ffff` on a hot one — and is consulted by no reader we know), an
+  `PCO2`'s is eight (flavour, count, pad).
+- A hot loop's `PCP2` entry carries its length in beats (numerator,
+  denominator 1) at offset 36, counted off the track's own grid, and a
+  colour tail `[0x00, r, g, b]` — orange `ff 8c 00` for the loop, the pad
+  colour for a point (A wrote `ff 00 17`).
+- All of a session's writes land at one flush moment (identical mtimes), so
+  the deck batches its ANLZ writes rather than writing per keystroke.
+- The `.2EX` is never touched; neither are `PSSI`, the waveforms or the
+  grids.
+
 ### 7.3 `PIONEER/*SETTING*.DAT` *(confirmed)*
 
 Uniform container, **little-endian**:

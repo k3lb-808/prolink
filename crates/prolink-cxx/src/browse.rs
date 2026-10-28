@@ -632,6 +632,7 @@ mod tests {
                 interface: None,
                 port: 0,
                 query_port: None,
+                splice_quiesce: None,
             },
             [medium],
         )

@@ -70,6 +70,7 @@ async fn serve_usb() -> (DbServer, u16) {
             // 12523 is fixed on the wire and a second test would collide with
             // it; the client is told the port directly instead.
             query_port: None,
+            splice_quiesce: None,
         },
         [medium],
     )
@@ -456,6 +457,7 @@ async fn two_media_are_told_apart_by_the_descriptor_alone() {
             interface: None,
             port: 0,
             query_port: None,
+            splice_quiesce: None,
         },
         [usb, sd],
     )
@@ -890,6 +892,7 @@ async fn a_plain_stick_is_browsed_and_read_the_way_a_cdj_reads_one() {
             interface: None,
             port: 0,
             query_port: None,
+            splice_quiesce: None,
         },
         [Arc::clone(&medium)],
     )

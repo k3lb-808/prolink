@@ -331,6 +331,21 @@ impl Medium {
         }
     }
 
+    /// A synthetic medium that also knows where its files are, for tests
+    /// that splice: the library is given, and `root` is a directory whose
+    /// analysis files the library's rows point into.
+    #[cfg(test)]
+    pub(crate) fn synthetic_rooted(
+        slot: ServedSlot,
+        library: Library,
+        volume_name: &str,
+        root: PathBuf,
+    ) -> Self {
+        let mut medium = Self::synthetic(slot, library, volume_name);
+        medium.root = Some(root);
+        medium
+    }
+
     /// The 32 settings bytes on a medium, or none.
     fn read_settings(volume: &Path) -> Vec<u8> {
         // A medium with no saved settings is ordinary, so a missing file is not
@@ -425,6 +440,38 @@ impl Medium {
     /// Where the medium is mounted locally, if anywhere.
     pub fn root(&self) -> Option<&Path> {
         self.root.as_deref()
+    }
+
+    /// The `.DAT` analysis file one track's records live in, as a real path.
+    ///
+    /// The same path [`Self::analysis`] reads through; a splicer wants it as
+    /// a file, not a parse.
+    pub(crate) fn analysis_dat_path(&self, track_id: u32) -> Option<PathBuf> {
+        let root = self.root.as_deref()?;
+        let track = self.library.tracks.get(&track_id)?;
+        let relative = track.analyze_path.trim_start_matches('/');
+        (!relative.is_empty()).then(|| root.join(relative))
+    }
+
+    /// The `.EXT` analysis file one track's records live in, as a real path.
+    pub(crate) fn analysis_ext_path(&self, track_id: u32) -> Option<PathBuf> {
+        let root = self.root.as_deref()?;
+        let track = self.library.tracks.get(&track_id)?;
+        let ext = track.analyze_ext_path()?;
+        Some(root.join(ext.trim_start_matches('/')))
+    }
+
+    /// Forget a track's parsed analysis, so the next ask re-reads the files.
+    ///
+    /// This is how a splice becomes visible to the wire replies: the files
+    /// change under the cache, the cache lets go, the next parse is the
+    /// spliced truth. Readers already holding the old parse keep it until
+    /// their reply is built — a moment's staleness, never a wrong answer
+    /// twice.
+    pub(crate) fn invalidate_analysis(&self, track_id: u32) {
+        if let Ok(mut cache) = self.analysis.lock() {
+            cache.remove(&track_id);
+        }
     }
 
     /// The volume label a peer is told about.

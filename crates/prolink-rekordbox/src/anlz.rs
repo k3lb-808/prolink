@@ -49,6 +49,7 @@
 //! doc comment says so instead of picking one silently.
 
 pub mod content;
+pub mod write;
 
 use std::fmt;
 use std::io::Cursor;

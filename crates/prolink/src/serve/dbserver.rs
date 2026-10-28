@@ -78,7 +78,7 @@
 //! # }
 //! ```
 
-mod analysis;
+pub(crate) mod analysis;
 mod keys;
 mod menu;
 mod plain;
@@ -86,7 +86,7 @@ mod plain;
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use prolink_proto::dbserver::{
     self, CueWriteRecord, Descriptor, Field, MAX_RENDER_BATCH, MenuItem, Message, MessageKind,
@@ -99,12 +99,26 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::interface::Interface;
-use crate::serve::cue_writes::{CueWrites, hex_encode};
+use crate::serve::cue_writes::CueWrites;
 use crate::serve::medium::{Medium, ServedSlot};
 use crate::serve::player::MediaSet;
+use crate::serve::splice;
 use crate::socket;
 use crate::virtual_cdj::LoadedTracks;
 use crate::{Error, Result};
+
+/// How long after a medium's last state-changing write its splice runs.
+///
+/// A deck re-asserts each held state about every 15 s, so a write that did
+/// not land comes back; the quiesce only needs to be long enough to swallow
+/// the burst of writes one edit produces — a set and its loop's assertions,
+/// seconds apart — without writing mid-burst. Five seconds covers it with
+/// room to spare; a process killed before then loses what the deck will
+/// re-assert anyway.
+const SPLIC_QUIESCE: Duration = Duration::from_secs(5);
+
+/// How often the splicer looks for a quiet medium.
+const SPLIC_POLL: Duration = Duration::from_secs(1);
 
 /// How many result sets one connection holds before the oldest is dropped.
 ///
@@ -150,6 +164,9 @@ pub struct DbServerConfig {
     /// Fixed at [`PORT_QUERY_PORT`]. Without it a deck never learns where our
     /// dbserver is and never connects, so this is only optional for tests.
     pub query_port: Option<u16>,
+    /// How long after a medium's last cue write its splice runs, or `None`
+    /// for the default. Tests set it short; nothing else has a reason to.
+    pub splice_quiesce: Option<Duration>,
 }
 
 impl Default for DbServerConfig {
@@ -165,6 +182,7 @@ impl Default for DbServerConfig {
             interface: None,
             port: PORT,
             query_port: Some(PORT_QUERY_PORT),
+            splice_quiesce: None,
         }
     }
 }
@@ -253,6 +271,8 @@ struct Shared {
     /// When the server started, for the prefix word the beat grid and detail
     /// waveform carry — which must be non-zero and must not go backwards (F33).
     started: Instant,
+    /// How long a medium stays dirty before its splice runs.
+    splic_quiesce: Duration,
 }
 
 impl Shared {
@@ -319,9 +339,13 @@ impl DbServer {
             media,
             cue_writes: CueWrites::new(),
             started: Instant::now(),
+            splic_quiesce: config.splice_quiesce.unwrap_or(SPLIC_QUIESCE),
         });
 
-        let mut tasks = vec![spawn_dbserver(listener, Arc::clone(&shared))];
+        let mut tasks = vec![
+            spawn_dbserver(listener, Arc::clone(&shared)),
+            spawn_splic(Arc::clone(&shared)),
+        ];
         let query_port = match config.query_port {
             None => None,
             Some(wanted) => match socket::listen(
@@ -392,6 +416,34 @@ impl DbServer {
 
 impl Drop for DbServer {
     fn drop(&mut self) {
+        // The shutdown splice, before the tasks die: whatever the decks
+        // wrote and no quiesce has landed yet goes into the tree now, while
+        // the media are still here to say where their files are. Best
+        // effort, and synchronous — a file that will not write keeps its
+        // bytes and says so in the log.
+        for (root, tracks) in self.shared.cue_writes.take_all() {
+            let Some(medium) = self
+                .shared
+                .media
+                .all()
+                .into_iter()
+                .find(|medium| medium.root() == Some(root.as_path()))
+            else {
+                continue;
+            };
+            for track in tracks {
+                let overlay = self.shared.cue_writes.overlay_for(Some(&root), track);
+                let outcome = splice::splice_track(&medium, track, &overlay);
+                if outcome.changed() {
+                    info!(
+                        ?root,
+                        track,
+                        ?outcome,
+                        "spliced a track's cues into the tree at shutdown"
+                    );
+                }
+            }
+        }
         for task in &self.tasks {
             task.abort();
         }
@@ -425,6 +477,18 @@ fn local_port(listener: &TcpListener) -> Result<u16> {
         SocketAddr::V4(address) => Ok(address.port()),
         SocketAddr::V6(address) => Ok(address.port()),
     }
+}
+
+/// A cue write's record bytes as hex, for the log: the one place a write
+/// whose shape nobody has decoded can still be read whole.
+fn hex_encode_record(record: &CueWriteRecord) -> String {
+    let mut out = String::with_capacity(record.raw().len() * 2);
+    for byte in record.raw() {
+        let value = u32::from(*byte);
+        out.push(char::from_digit(value / 16, 16).unwrap_or('0'));
+        out.push(char::from_digit(value % 16, 16).unwrap_or('0'));
+    }
+    out
 }
 
 /// Answer the fixed nineteen-byte port query with the port we are serving on.
@@ -469,6 +533,65 @@ fn spawn_dbserver(listener: TcpListener, shared: Arc<Shared>) -> JoinHandle<()> 
                 }
                 info!(%peer, "dbserver client disconnected");
             });
+        }
+    })
+}
+
+/// Splice the deck's cue writes into the served tree, when a medium is quiet.
+///
+/// The task polls the cue-write store once a second and takes whatever has
+/// been quiet for [`SPLIC_QUIESCE`]; the splice itself is synchronous file
+/// work, so it runs in a blocking task. A medium whose writes never come is
+/// a poll that finds nothing; a medium unmounted while dirty has no splice
+/// left to run — the files are gone with it.
+fn spawn_splic(shared: Arc<Shared>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // The poll trails the quiesce: a quarter of it, never above the
+        // default poll, never below a floor a scheduler can keep.
+        let poll = (shared.splic_quiesce / 4)
+            .max(Duration::from_millis(10))
+            .min(SPLIC_POLL);
+        let mut tick = tokio::time::interval(poll);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            for (root, tracks) in shared.cue_writes.take_quiesced(shared.splic_quiesce) {
+                let Some(medium) = shared
+                    .media
+                    .all()
+                    .into_iter()
+                    .find(|medium| medium.root() == Some(root.as_path()))
+                else {
+                    debug!(
+                        ?root,
+                        tracks = tracks.len(),
+                        "a dirty medium is not served; nothing to splice"
+                    );
+                    continue;
+                };
+                for track in tracks {
+                    let medium = Arc::clone(&medium);
+                    let overlay = shared.cue_writes.overlay_for(Some(&root), track);
+                    let joined = tokio::task::spawn_blocking(move || {
+                        splice::splice_track(&medium, track, &overlay)
+                    })
+                    .await;
+                    match joined {
+                        Ok(outcome) if outcome.changed() => {
+                            info!(
+                                ?root,
+                                track,
+                                ?outcome,
+                                "spliced a track's cues into the tree"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(?root, track, %error, "the splice task died; the deck will re-assert");
+                        }
+                    }
+                }
+            }
         }
     })
 }
@@ -756,15 +879,18 @@ impl Session {
                 {
                     if let Some(medium) = shared.medium(slot) {
                         let hot_cue = record.hot_cue();
-                        shared.cue_writes.apply(medium.root(), track, set, &record);
-                        // The raw bytes ride in the journal, so a write
-                        // whose shape nobody has decoded — a memory cue,
-                        // say — can be read off the log alone.
+                        let changed = shared.cue_writes.apply(medium.root(), track, set, &record);
+                        // The raw bytes ride in the log, so a write whose
+                        // shape nobody has decoded — a memory cue, say —
+                        // can be read off it alone. A re-assertion of a
+                        // state already held says so: it is the deck's 15 s
+                        // loop, not a DJ's edit.
                         info!(
                             track,
                             hot_cue,
                             set,
-                            record = hex_encode(record.raw()),
+                            changed,
+                            record = hex_encode_record(&record),
                             "a deck wrote a cue",
                         );
                         // rekordbox answers a cue write with the refreshed

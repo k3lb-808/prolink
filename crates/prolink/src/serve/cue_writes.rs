@@ -1,31 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Cue writes from the decks, persisted beside the medium they name.
+//! Cue writes from the decks, held in memory until the splice lands them.
 //!
 //! A deck writes a cue straight into the source (`0x2705`, F65): third
 //! argument `1` sets a hot cue, `0` removes it, and the deck re-asserts each
 //! state about every 15 s while the track stays loaded — the writes are
-//! idempotent, so a repeat costs nothing. The writes arrive while the deck
-//! is *playing* our tree, so they cannot be folded back into the cratify
-//! export that tree was generated from; instead they live in a sidecar
-//! beside it, `.prolink-cues`, and the cue replies overlay them onto the
-//! analysis records. A cratify re-export leaves the sidecar untouched.
+//! idempotent, so a repeat costs nothing. The replies overlay the writes
+//! onto the analysis records at reply time ([`crate::serve::dbserver`]), and
+//! the splice ([`crate::serve::splice`]) lands the same state into the
+//! served tree's own ANLZ files.
 //!
-//! The sidecar is a line log, oldest first, replayed in order:
-//!
-//! ```text
-//! S <track> <hot cue> <the record bytes, hex>
-//! R <track> <hot cue> <position in ms>
-//! ```
-//!
-//! The position on an `R` line is what a memory remove needs — its identity
-//! is the position, and the line is all a replay sees. Older sidecars without
-//! it replay with the memory clear simply unrepresented; the deck re-asserts
-//! nothing for a cue it dropped, so nothing resurfaces that matters.
-//!
-//! Replay rebuilds the overlay exactly, later lines winning; a bad line is
-//! skipped rather than fatal, because the deck will simply rewrite what it
-//! still holds.
+//! The overlay is deliberately **memory only**. The spliced files are the
+//! persistence: once a track's splice has run, its cue state is in the
+//! tree's own analysis files, where a restart parses it straight back. What
+//! is lost when the process dies before the splice is exactly what the deck
+//! still holds and will re-assert — the deck repeats every state it carries
+//! about every 15 s, so anything lost mid-set is captured again on the next
+//! pass. There is no sidecar to replay: a `.prolink-cues` file an older
+//! prolink left behind is simply ignored.
 //!
 //! Hot cues and memory cues part ways in the model (F66): a hot cue is
 //! identified by its slot number and the deck holds eight; a memory cue
@@ -36,15 +28,17 @@
 //! clears exactly the position it names. A memory set also un-clears its
 //! position: the deck re-set a cue the same DJ had just deleted is the
 //! deck's truth.
+//!
+//! The store also tracks what is **dirty**: which medium's tracks changed
+//! and when last. Re-assertions of an unchanged state mark nothing — the
+//! splice trigger reads this, and a quiesce without a change costs nothing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use prolink_proto::dbserver::CueWriteRecord;
-
-/// The sidecar file's name, relative to a medium's root.
-const SIDECAR: &str = ".prolink-cues";
 
 /// What the decks have written for one track.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -60,33 +54,46 @@ pub struct TrackOverlay {
     pub memory_cleared: BTreeSet<u32>,
 }
 
-/// Every track's overlay for one medium, loaded lazily and written through.
+/// Every track's overlay for one medium, and what in it has changed.
 #[derive(Debug, Default)]
 pub struct CueWrites {
-    media: Mutex<HashMap<PathBuf, MediaOverlay>>,
+    media: Mutex<HashMap<PathBuf, HashMap<u32, TrackOverlay>>>,
+    dirty: Mutex<BTreeMap<PathBuf, Dirty>>,
 }
 
+/// What has changed on one medium, and when it last did.
 #[derive(Debug, Default)]
-struct MediaOverlay {
-    loaded: bool,
-    tracks: HashMap<u32, TrackOverlay>,
+struct Dirty {
+    tracks: BTreeSet<u32>,
+    last_write: Option<Instant>,
 }
 
 impl CueWrites {
-    /// An empty store. Each medium's overlay is loaded from its sidecar the
-    /// first time it is needed.
+    /// An empty store. Each medium's overlay builds up from the deck's
+    /// writes; its persistence is the splice, not anything kept here.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Apply one deck write. `set` is the request's third argument as a
     /// boolean: `true` sets the cue, `false` removes it.
-    pub fn apply(&self, root: Option<&Path>, track: u32, set: bool, record: &CueWriteRecord) {
+    ///
+    /// Returns whether the track's state actually changed: a re-assertion of
+    /// a state already held changes nothing, marks nothing dirty, and costs
+    /// the splice nothing.
+    pub fn apply(
+        &self,
+        root: Option<&Path>,
+        track: u32,
+        set: bool,
+        record: &CueWriteRecord,
+    ) -> bool {
         let Some(root) = root else {
-            return;
+            return false;
         };
         let hot_cue = record.hot_cue();
-        self.with_track_overlay(root, track, |overlay| {
+        let changed = self.with_track_overlay(root, track, |overlay| {
+            let before = overlay.clone();
             if hot_cue == 0 {
                 // A memory cue: position-keyed, each fresh set another cue
                 // and a remove clearing its own position (F66).
@@ -104,8 +111,18 @@ impl CueWrites {
                 overlay.upserts.remove(&hot_cue);
                 overlay.removed.insert(hot_cue);
             }
+            before != *overlay
         });
-        append_line(root, track, set, hot_cue, record);
+        if changed {
+            let mut dirty = self
+                .dirty
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = dirty.entry(root.to_path_buf()).or_default();
+            entry.tracks.insert(track);
+            entry.last_write = Some(Instant::now());
+        }
+        changed
     }
 
     /// The overlay for one track: what to replace, what to drop.
@@ -116,8 +133,8 @@ impl CueWrites {
         self.with_track_overlay(root, track, |overlay| overlay.clone())
     }
 
-    /// The overlay for one track of one medium, loading the sidecar on
-    /// first touch. The guard is the store's, so mutations persist.
+    /// The overlay for one track of one medium. The guard is the store's, so
+    /// mutations persist.
     fn with_track_overlay<R>(
         &self,
         root: &Path,
@@ -128,105 +145,45 @@ impl CueWrites {
             .media
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let overlay = media.entry(root.to_path_buf()).or_default();
-        if !overlay.loaded {
-            overlay.tracks = load(&root.join(SIDECAR));
-            overlay.loaded = true;
-        }
-        apply(overlay.tracks.entry(track).or_default())
+        apply(
+            media
+                .entry(root.to_path_buf())
+                .or_default()
+                .entry(track)
+                .or_default(),
+        )
     }
-}
 
-/// Append one write to the sidecar, write-and-rename so a crash mid-write
-/// cannot leave a half line behind a reader would trust.
-fn append_line(root: &Path, track: u32, set: bool, hot_cue: u16, record: &CueWriteRecord) {
-    let path = root.join(SIDECAR);
-    // The record travels in the line, so a replay rebuilds it whole.
-    let line = if set {
-        format!("S {track} {hot_cue} {}\n", hex_encode(record.raw()))
-    } else {
-        format!("R {track} {hot_cue} {}\n", record.time_ms())
-    };
-    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
-    existing.push_str(&line);
-    let tmp = path.with_extension("tmp");
-    if let Err(error) = std::fs::write(&tmp, existing).and_then(|()| std::fs::rename(&tmp, &path)) {
-        tracing::warn!(%error, "the cue sidecar could not be renamed into place");
+    /// Take the overlays of every medium that has been quiet for `after`
+    /// since its last write.
+    ///
+    /// Taking is draining: a splice that fails loses its dirty mark, and the
+    /// deck's next re-assertion — the writes are idempotent and repeated
+    /// about every 15 s — makes the track dirty again. A quiet medium with
+    /// nothing taken costs this call nothing.
+    pub fn take_quiesced(&self, after: Duration) -> Vec<(PathBuf, BTreeSet<u32>)> {
+        self.take(|dirty| dirty.last_write.is_some_and(|at| at.elapsed() >= after))
     }
-}
 
-/// Replay a sidecar. Later lines win; a bad line is skipped.
-fn load(path: &Path) -> HashMap<u32, TrackOverlay> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    let mut tracks: HashMap<u32, TrackOverlay> = HashMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut fields = line.split(' ');
-        let op = fields.next().unwrap_or("");
-        let track: u32 = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-        let hot_cue: u16 = fields.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-        let overlay = tracks.entry(track).or_default();
-        match (op, fields.next()) {
-            ("S", Some(hex)) => {
-                if let Some(bytes) = hex_decode(hex)
-                    && let Ok(record) = CueWriteRecord::parse(&bytes)
-                {
-                    if hot_cue == 0 {
-                        let position = record.time_ms();
-                        overlay.memories.insert(position, record);
-                        overlay.memory_cleared.remove(&position);
-                    } else {
-                        overlay.upserts.insert(hot_cue, record);
-                        overlay.removed.remove(&hot_cue);
-                    }
-                }
-            }
-            ("R", position) => {
-                if hot_cue == 0 {
-                    if let Some(ms) = position.and_then(|f| f.parse().ok()) {
-                        overlay.memories.remove(&ms);
-                        overlay.memory_cleared.insert(ms);
-                    }
-                } else {
-                    overlay.upserts.remove(&hot_cue);
-                    overlay.removed.insert(hot_cue);
-                }
-            }
-            _ => {}
-        }
+    /// Take everything dirty, quiesced or not: the shutdown splice.
+    pub fn take_all(&self) -> Vec<(PathBuf, BTreeSet<u32>)> {
+        self.take(|_| true)
     }
-    tracks
-}
 
-fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len().div_ceil(2));
-    let mut chars = text.chars();
-    loop {
-        match (chars.next(), chars.next()) {
-            (Some(hi), Some(lo)) => {
-                let value = hi
-                    .to_digit(16)?
-                    .checked_mul(16)?
-                    .checked_add(lo.to_digit(16)?)?;
-                out.push(u8::try_from(value).ok()?);
-            }
-            (None, None) => return Some(out),
-            (_, Some(_)) | (Some(_), None) => return None,
+    /// Drain dirty media the predicate admits, newest write first.
+    fn take(&self, admit: impl Fn(&Dirty) -> bool) -> Vec<(PathBuf, BTreeSet<u32>)> {
+        let mut dirty = self
+            .dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let taken = dirty
+            .iter()
+            .filter(|(_, entry)| admit(entry))
+            .map(|(root, entry)| (root.clone(), entry.tracks.clone()))
+            .collect::<Vec<_>>();
+        for (root, _) in &taken {
+            dirty.remove(root);
         }
+        taken
     }
-}
-
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let value = u32::from(*byte);
-        out.push(char::from_digit(value / 16, 16).unwrap_or('0'));
-        out.push(char::from_digit(value % 16, 16).unwrap_or('0'));
-    }
-    out
 }

@@ -442,6 +442,7 @@ fn shared(media: impl IntoIterator<Item = Arc<Medium>>) -> Shared {
         device: BrowsableDeviceNumber::new(2).expect("device 2 is browsable"),
         media: Arc::new(MediaSet::new(media)),
         cue_writes: CueWrites::new(),
+        splic_quiesce: Duration::from_secs(5),
         started: Instant::now(),
     }
 }
@@ -2816,32 +2817,50 @@ fn memory_write_record(time_ms: u32) -> CueWriteRecord {
     CueWriteRecord::parse(&raw).expect("the memory record")
 }
 
-#[test]
-fn a_cue_write_sidecar_replays_whole() {
-    let dir = std::env::temp_dir().join(format!(
-        "prolink-cue-sidecar-{}-{:?}",
-        std::process::id(),
-        Duration::from_secs(u64::from(std::process::id()))
-    ));
+/// A scratch root for a medium's overlay: a directory, not a file anywhere
+/// near a real stick.
+fn overlay_root(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("prolink-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temp root");
+    dir
+}
+
+#[test]
+fn a_cue_write_holds_its_state_and_marks_the_track_dirty() {
+    let dir = overlay_root("cue-writes");
     let writes = CueWrites::new();
     let set = cue_write_record(2110);
-    writes.apply(Some(&dir), 260, true, &set);
-    // A fresh store must replay the sidecar to the same overlay.
-    let replayed = CueWrites::new();
-    let overlay = replayed.overlay_for(Some(&dir), 260);
+    assert!(
+        writes.apply(Some(&dir), 260, true, &set),
+        "a first set lands"
+    );
+    let overlay = writes.overlay_for(Some(&dir), 260);
     assert_eq!(
         overlay.upserts.get(&1).map(CueWriteRecord::time_ms),
         Some(2110)
     );
     assert!(!overlay.removed.contains(&1), "a set undoes a removal");
-    // And a removal after it lands as a removal.
-    writes.apply(Some(&dir), 260, false, &set);
-    let replayed = CueWrites::new();
-    let overlay = replayed.overlay_for(Some(&dir), 260);
+    // The deck re-asserts the same state about every 15 s: no change, no
+    // dirt, nothing for the splice to look at.
+    assert!(
+        !writes.apply(Some(&dir), 260, true, &set),
+        "a re-assertion of the held state is a no-op"
+    );
+    // And a removal after it lands as a removal, and dirties again.
+    assert!(writes.apply(Some(&dir), 260, false, &set));
+    let overlay = writes.overlay_for(Some(&dir), 260);
     assert!(overlay.upserts.is_empty());
     assert!(overlay.removed.contains(&1));
-    drop(replayed);
+    // The quiesce takes what the writes marked.
+    let taken = writes.take_quiesced(Duration::ZERO);
+    assert_eq!(
+        taken,
+        vec![(dir.clone(), [260].into())],
+        "the track the writes touched, and nothing else"
+    );
+    assert!(writes.take_all().is_empty(), "a take is a drain");
+    drop(writes);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3030,23 +3049,19 @@ fn memory_cues_accumulate_one_per_position() {
 }
 
 #[test]
-fn a_memory_cue_replays_through_the_sidecar_whole() {
-    let dir = std::env::temp_dir().join(format!(
-        "prolink-cue-memory-{}-{:?}",
-        std::process::id(),
-        Duration::from_secs(u64::from(std::process::id()))
-    ));
-    std::fs::create_dir_all(&dir).expect("a temp root");
+fn a_memory_cue_holds_whole_until_the_splice_lands() {
+    let dir = overlay_root("cue-memory");
     let writes = CueWrites::new();
     writes.apply(Some(&dir), 1012, true, &memory_write_record(2020));
     writes.apply(Some(&dir), 1012, true, &memory_write_record(4040));
     writes.apply(Some(&dir), 1012, false, &memory_write_record(4040));
-    let replayed = CueWrites::new();
-    let overlay = replayed.overlay_for(Some(&dir), 1012);
+    // The store's own state, no replay needed: the overlay is what the
+    // splice will read, and the files after it will hold the same.
+    let overlay = writes.overlay_for(Some(&dir), 1012);
     assert_eq!(
         overlay.memories.get(&2020).map(CueWriteRecord::time_ms),
         Some(2020),
-        "the untouched memory survives the replay"
+        "the untouched memory survives"
     );
     assert!(
         !overlay.memories.contains_key(&4040),
@@ -3054,8 +3069,201 @@ fn a_memory_cue_replays_through_the_sidecar_whole() {
     );
     assert!(
         overlay.memory_cleared.contains(&4040),
-        "the cleared position survives the replay"
+        "the cleared position survives"
     );
-    drop(replayed);
+    // The removal changed state; the re-assertion of it changes nothing.
+    assert!(
+        !writes.apply(Some(&dir), 1012, false, &memory_write_record(4040)),
+        "a remove of an already-cleared position is a no-op"
+    );
+    let taken = writes.take_all();
+    assert_eq!(taken, vec![(dir.clone(), [1012].into())]);
+    drop(writes);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -- the splice: the deck's writes land in the tree's own files (F67) ------
+
+/// The ANLZ container bytes a synthetic track's analysis files start with:
+/// a path, an empty beat grid, and empty cue lists — cratify's own shapes.
+fn splice_base_anlz(track_path: &str) -> Vec<u8> {
+    let mut text: Vec<u8> = track_path
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    text.extend_from_slice(&[0, 0]);
+    let mut extra = u32::try_from(text.len())
+        .unwrap_or(0)
+        .to_be_bytes()
+        .to_vec();
+    extra.extend_from_slice(&0u32.to_be_bytes());
+    let mut path = b"PPTH".to_vec();
+    path.extend_from_slice(&20u32.to_be_bytes());
+    path.extend_from_slice(&u32::try_from(20 + text.len()).unwrap_or(0).to_be_bytes());
+    path.extend_from_slice(&extra);
+    path.extend_from_slice(&text);
+    let empty_list = |flavour: u32| {
+        let mut extra = flavour.to_be_bytes().to_vec();
+        extra.extend_from_slice(&0u16.to_be_bytes());
+        extra.extend_from_slice(&0u16.to_be_bytes());
+        extra.extend_from_slice(&0xffff_ffffu32.to_be_bytes());
+        let mut raw = b"PCOB".to_vec();
+        raw.extend_from_slice(&24u32.to_be_bytes());
+        raw.extend_from_slice(&24u32.to_be_bytes());
+        raw.extend_from_slice(&extra);
+        raw
+    };
+    let mut body = path;
+    body.extend_from_slice(&empty_list(0));
+    body.extend_from_slice(&empty_list(1));
+    let mut out = b"PMAI".to_vec();
+    out.extend_from_slice(&28u32.to_be_bytes());
+    out.extend_from_slice(&u32::try_from(28 + body.len()).unwrap_or(0).to_be_bytes());
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.extend_from_slice(&0x10000u32.to_be_bytes());
+    out.extend_from_slice(&0x10000u32.to_be_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A volume with one track's analysis files in it, and the medium serving it.
+///
+/// The track's id is 1; its analysis lives where the row points.
+fn splice_volume(tag: &str) -> (Arc<Medium>, std::path::PathBuf) {
+    let volume = std::env::temp_dir().join(format!("prolink-splice-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&volume);
+    let anlz_dir = volume.join("PIONEER/USBANLZ/P000/00000001");
+    std::fs::create_dir_all(&anlz_dir).expect("the anlz dir");
+    let base = splice_base_anlz("/Contents/track.mp3");
+    std::fs::write(anlz_dir.join("ANLZ0000.DAT"), &base).expect("the .DAT");
+    std::fs::write(anlz_dir.join("ANLZ0000.EXT"), &base).expect("the .EXT");
+
+    let mut library = Library::default();
+    let mut track = prolink_rekordbox::Track {
+        id: 1,
+        title: "Spliced".to_owned(),
+        ..prolink_rekordbox::Track::default()
+    };
+    track.analyze_path = "/PIONEER/USBANLZ/P000/00000001/ANLZ0000.DAT".to_owned();
+    library.tracks.insert(1, track);
+    let medium = Arc::new(Medium::synthetic_rooted(
+        ServedSlot::USB,
+        library,
+        "SPLICE",
+        volume.clone(),
+    ));
+    (medium, volume)
+}
+
+#[tokio::test]
+async fn a_quiet_mediums_cue_writes_are_spliced_into_its_files() {
+    let (medium, volume) = splice_volume("trigger");
+    let dat = volume.join("PIONEER/USBANLZ/P000/00000001/ANLZ0000.DAT");
+    let before = std::fs::read(&dat).expect("the base .DAT");
+
+    let server = DbServer::start_watching(
+        DbServerConfig {
+            port: 0,
+            query_port: None,
+            splice_quiesce: Some(Duration::from_millis(50)),
+            ..DbServerConfig::default()
+        },
+        Arc::new(MediaSet::new([Arc::clone(&medium)])),
+        Arc::new(LoadedTracks::default()),
+    )
+    .await
+    .expect("the server starts");
+
+    // The deck writes a hot cue; the store takes it, marks the medium dirty.
+    let applied = server
+        .shared
+        .cue_writes
+        .apply(medium.root(), 1, true, &cue_write_record(2110));
+    assert!(applied, "the write changed the track's state");
+
+    // The quiesce passes, the splicer runs, the file carries the cue.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let spliced = std::fs::read(&dat).expect("the spliced .DAT");
+    assert_ne!(spliced, before, "the splice rewrote the file");
+    let parsed = prolink_rekordbox::AnlzFile::parse(&spliced).expect("the spliced file parses");
+    let hot = parsed
+        .tags(prolink_rekordbox::FourCc::PCOB)
+        .find(|tag| {
+            prolink_rekordbox::anlz::write::list_flavour(tag)
+                == Some(prolink_rekordbox::anlz::CueListType::HOT)
+        })
+        .expect("the hot list");
+    let entries = prolink_rekordbox::anlz::write::parse_pcob_entries(hot.payload());
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| (e.hot_cue, e.time))
+            .collect::<Vec<_>>(),
+        vec![(1, 2110)],
+        "the deck's write is in the file"
+    );
+
+    // And the served parse is the spliced truth: the cache was let go, so
+    // the next reply is built from the file's own lists.
+    let analysis = medium.analysis(1);
+    assert_eq!(
+        analysis
+            .dat
+            .as_ref()
+            .expect("the .DAT parses")
+            .cue_lists()
+            .flat_map(|list| list.cues.iter())
+            .map(|cue| (cue.hot_cue, cue.time))
+            .collect::<Vec<_>>(),
+        vec![(1, 2110)],
+        "the parse cache was invalidated"
+    );
+
+    server.shared.cue_writes.take_all();
+    drop(server);
+    let _ = std::fs::remove_dir_all(&volume);
+}
+
+#[tokio::test]
+async fn a_shutdown_splices_what_the_quiesce_has_not() {
+    let (medium, volume) = splice_volume("shutdown");
+    let dat = volume.join("PIONEER/USBANLZ/P000/00000001/ANLZ0000.DAT");
+    let before = std::fs::read(&dat).expect("the base .DAT");
+
+    let server = DbServer::start_watching(
+        DbServerConfig {
+            port: 0,
+            query_port: None,
+            // A quiesce longer than the test: only the drop can splice.
+            splice_quiesce: Some(Duration::from_secs(1234)),
+            ..DbServerConfig::default()
+        },
+        Arc::new(MediaSet::new([Arc::clone(&medium)])),
+        Arc::new(LoadedTracks::default()),
+    )
+    .await
+    .expect("the server starts");
+    server
+        .shared
+        .cue_writes
+        .apply(medium.root(), 1, true, &cue_write_record(500));
+    drop(server);
+
+    let spliced = std::fs::read(&dat).expect("the spliced .DAT");
+    assert_ne!(spliced, before, "the shutdown splice rewrote the file");
+    let parsed = prolink_rekordbox::AnlzFile::parse(&spliced).expect("the spliced file parses");
+    let entries = parsed
+        .tags(prolink_rekordbox::FourCc::PCOB)
+        .flat_map(|tag| prolink_rekordbox::anlz::write::parse_pcob_entries(tag.payload()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|e| (e.hot_cue, e.time))
+            .collect::<Vec<_>>(),
+        vec![(1, 500)],
+        "the write landed at shutdown"
+    );
+    let _ = std::fs::remove_dir_all(&volume);
 }

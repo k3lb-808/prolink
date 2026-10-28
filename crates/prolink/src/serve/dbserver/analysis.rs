@@ -340,7 +340,7 @@ pub(super) fn apply_extended_overlay(
 /// rounded. rekordbox's own served loops carry the count (F66: a loop of
 /// three grid steps served numerator 3, denominator 1) and the deck draws
 /// the loop from it.
-pub(super) fn loop_beats(grid: &[u8], start_ms: u32, end_ms: u32) -> Option<u16> {
+pub(crate) fn loop_beats(grid: &[u8], start_ms: u32, end_ms: u32) -> Option<u16> {
     let times: Vec<u32> = grid
         .chunks_exact(8)
         .filter_map(|entry| match entry {

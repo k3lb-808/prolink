@@ -15,6 +15,7 @@ pub mod medium;
 pub mod nfs;
 pub mod player;
 pub mod preserve;
+pub(crate) mod splice;
 pub mod tags;
 pub mod vfs;
 
