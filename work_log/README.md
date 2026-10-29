@@ -57,6 +57,7 @@ Status key: `todo` · `wip` · `done` · `blocked` · `dropped`
 | 43 | Cue write-back: `0x2705` decoded from the live capture, the sidecar overlay store, both cue replies overlaid | done, on-deck verify open | [043](043-cue-write-back.md); F65 |
 | 44 | Loops and memory cues (F66): the ack is the refreshed list on the write's own kind, memory cues accumulate per position, loops are orange | done | [044](044-loops-and-memory-cues.md); F66 |
 | 45 | The splice: the deck's own USB writes captured (F67 — ANLZ only, no database), the ANLZ encoder, `serve/splice.rs`, quiesce/shutdown triggers, write dedup, the sidecar removed | done, F67 acceptance open | [045](045-the-splice.md); F67 |
+| 46 | The colour tail decoded (the write record's `0x4e` = the F67 entry tail, `(code, r, g, b)`) and minted: fresh hot cues land with the deck's own pad colour | done | [046](046-the-colour-tail.md); F67 |
 
 ## Acceptance: what the CLI must be able to do
 

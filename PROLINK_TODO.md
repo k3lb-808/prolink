@@ -43,10 +43,6 @@ python, no second project in the loop.
   deck, stop prolink, plug the stick into the XDJ's USB port directly, boot:
   hot cues, memory cues, loops and colours all present. The capture evidence
   (the deck reads its own spliced-style output) says it will be; run it.
-- Optional refinement: mint fresh hot-cue `PCP2` entries with the deck's own
-  pad-colour tails (the F67 capture recorded A = `00 ff 00 17`, loops =
-  `00 ff 8c 00`); today's mints are colourless, which is all the write
-  record itself carries, and the deck renders its own pad defaults.
 - Optional: phrase-marker conventions for deck-written cues that sit on
   phrase starts (rekordbox writes `comment` + colour there; the deck does
   not).
@@ -58,3 +54,20 @@ python, no second project in the loop.
   sides could take an advisory `flock` on a lock file beside the tree:
   prolink around each splice, cratify around settle+render. Contract item
   for PROTOCOL.md if it ever matters; the re-assertion makes it theoretical.
+
+## Landed since
+
+- **The colour tail is decoded, and the mints carry it.** The write
+  record's `0x4e..0x50` holds `(code, r, g, b)` — the byte-identical tuple
+  the deck's own stick write (F67) puts at a `PCP2` entry's offset 44: hot
+  cue A red `00 ff 00 17`, a loop orange `00 ff 8c 00` (the deck's pad
+  defaults). `CueWriteRecord::color_tail` reads it (`None` on the memory
+  record's shorter shape and on all-zero tails), and the splicer's fresh
+  mints grow to the deck's own 48-byte shape with the tail at 44 — patched
+  entries keep the base's bytes, as the deck itself does. cratify's ingest
+  (its PCO2 parser now reads tails off short entries too) takes the colour
+  into the DB and the re-export renders it verbatim: a colour the deck
+  assigned survives the whole round trip. The served *reply* still uses the
+  verified shapes (loops `0x24 ff 8c 00`, the palette cycle for colourless
+  hot cues) — whether a deck renders a code-`0x00` tail from a reply is
+  part of the open F67 acceptance question.

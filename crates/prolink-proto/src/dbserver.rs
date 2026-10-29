@@ -1544,6 +1544,11 @@ impl CueWriteRecord {
     const OFF_TIME: usize = 0x0c;
     /// The loop position; `0xffff_ffff` when it is not a loop.
     const OFF_LOOP: usize = 0x10;
+    /// The deck's colour tail: `(code, r, g, b)` — the same four bytes the
+    /// deck's own stick write puts at a `PCP2` entry's offset 44 (F67: hot
+    /// cue A red `00 ff 00 17`, a loop orange `00 ff 8c 00`). Only the hot
+    /// record's 84-byte shape reaches it; a memory record ends at `0x4c`.
+    const OFF_COLOR_TAIL: usize = 0x4e;
 
     /// Parse a write record: the shortest observed shape at least, any tail
     /// verbatim.
@@ -1600,6 +1605,21 @@ impl CueWriteRecord {
                 .unwrap_or([0; 4]),
         )
     }
+
+    /// The deck's colour tail, `(code, r, g, b)`: `None` on the memory
+    /// record's shorter shape (it ends before the field) and on an all-zero
+    /// tail, which is no colour.
+    pub fn color_tail(&self) -> Option<[u8; 4]> {
+        let tail: [u8; 4] = self
+            .raw
+            .get(Self::OFF_COLOR_TAIL..Self::OFF_COLOR_TAIL + 4)?
+            .try_into()
+            .ok()?;
+        if tail == [0; 4] {
+            return None;
+        }
+        Some(tail)
+    }
 }
 
 impl fmt::Debug for CueWriteRecord {
@@ -1609,6 +1629,7 @@ impl fmt::Debug for CueWriteRecord {
             .field("cue_type", &self.cue_type())
             .field("time_ms", &self.time_ms())
             .field("loop_ms", &self.loop_ms())
+            .field("color_tail", &self.color_tail())
             .finish()
     }
 }

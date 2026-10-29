@@ -85,6 +85,31 @@ pub fn pcp2_entry(hot_cue: u32, cue_type: u8, time: u32, loop_time: u32) -> Vec<
     out
 }
 
+/// The coloured `PCP2` shape's length: the compact entry plus the deck's
+/// four `(code, r, g, b)` bytes at offset 44 — the 48-byte entries the
+/// deck's own stick writes carry (F67: hot cue A red `00 ff 00 17`, a loop
+/// orange `00 ff 8c 00`).
+pub const PCP2_COLORED_LEN: usize = 48;
+
+/// Build a `PCP2` entry with the deck's colour tail: the compact shape's
+/// fields, the declared length grown to cover the four bytes.
+#[rustfmt::skip]
+pub fn pcp2_entry_colored(
+    hot_cue: u32,
+    cue_type: u8,
+    time: u32,
+    loop_time: u32,
+    tail: [u8; 4],
+) -> Vec<u8> {
+    let mut out = pcp2_entry(hot_cue, cue_type, time, loop_time);
+    let len = u32::try_from(PCP2_COLORED_LEN).unwrap_or(u32::MAX);
+    if let Some(slot) = out.get_mut(8..12) {
+        slot.copy_from_slice(&len.to_be_bytes());
+    }
+    out.extend_from_slice(&tail);
+    out
+}
+
 /// Build a whole `PCOB` tag from a list header's bytes and an entries span.
 ///
 /// The list header rides through verbatim — its flavour word and the `num2`
@@ -339,6 +364,26 @@ mod tests {
         // fields past them — loop length, comment length — are ours again.
         assert_eq!(&entry[..29], &deck[..29], "the fixed fields");
         assert_eq!(&entry[36..], &deck[36..], "loop length and comment length");
+    }
+
+    #[test]
+    fn a_colored_pcp2_entry_is_the_deck_s_own_f67_shape() {
+        // Hot cue A red: the deck's own stick-write put the four colour
+        // bytes at 44, the entry grown to 48 with the length field saying
+        // so (F67).
+        let entry = pcp2_entry_colored(1, 1, 22, u32::MAX, [0x00, 0xff, 0x00, 0x17]);
+        assert_eq!(entry.len(), PCP2_COLORED_LEN);
+        assert_eq!(
+            u32::from_be_bytes(entry[8..12].try_into().expect("the length")),
+            48,
+            "the entry length covers the tail"
+        );
+        assert_eq!(&entry[44..48], &[0x00, 0xff, 0x00, 0x17], "the tail");
+        // The compact shape's fields ride unchanged, the length aside: the
+        // coloured entry's own length word says 48.
+        let compact = pcp2_entry(1, 1, 22, u32::MAX);
+        assert_eq!(&entry[..8], &compact[..8], "the tag and header length");
+        assert_eq!(&entry[12..44], &compact[12..44], "the fields");
     }
 
     #[test]

@@ -490,20 +490,25 @@ fn merged_entries(
     out
 }
 
-/// The four numbers a deck's write record carries, as an entry names them.
-fn record_values(record: &CueWriteRecord) -> (u32, u8, u32, u32) {
+/// The five values a deck's write record carries, as an entry names them —
+/// the colour tail the deck assigns at cue creation rides along (F67: the
+/// record's `0x4e` is the same `(code, r, g, b)` its own stick write puts
+/// at a `PCP2` entry's offset 44); `None` on a memory record, whose shorter
+/// shape ends before the field.
+fn record_values(record: &CueWriteRecord) -> (u32, u8, u32, u32, Option<[u8; 4]>) {
     (
         u32::from(record.hot_cue()),
         u8::try_from(record.cue_type()).map_or(1, |ty| if ty == 2 { 2 } else { 1 }),
         record.time_ms(),
         record.loop_ms(),
+        record.color_tail(),
     )
 }
 
 /// An entry's bytes: the base's, patched in place, or a fresh mint.
 fn entry_for(
     base: Option<&[u8]>,
-    (hot_cue, cue_type, time, loop_time): (u32, u8, u32, u32),
+    (hot_cue, cue_type, time, loop_time, tail): (u32, u8, u32, u32, Option<[u8; 4]>),
     kind: FourCc,
     grid: &[u8],
 ) -> Vec<u8> {
@@ -514,17 +519,27 @@ fn entry_for(
     }
     match kind {
         f if f == FourCc::PCOB => write::pcpt_entry(hot_cue, cue_type, time, loop_time),
-        _ => write::pcp2_entry(hot_cue, cue_type, time, loop_time),
+        _ => match tail {
+            Some(tail) => write::pcp2_entry_colored(hot_cue, cue_type, time, loop_time, tail),
+            None => write::pcp2_entry(hot_cue, cue_type, time, loop_time),
+        },
     }
 }
 
 /// An entry kept as it was: its own bytes when it already has the target's
 /// shape, a re-encoding of its numbers when it migrates between list kinds.
+/// A basic entry carries no colour, so the re-encoding mints colourless.
 fn kept(entry: &RawEntry, source: FourCc, target: FourCc) -> Vec<u8> {
     if source == target {
         entry.bytes.clone()
     } else {
-        entry_for(None, entry.values(), target, &[])
+        let (hot_cue, cue_type, time, loop_time) = entry.values();
+        entry_for(
+            None,
+            (hot_cue, cue_type, time, loop_time, None),
+            target,
+            &[],
+        )
     }
 }
 
@@ -628,7 +643,7 @@ mod tests {
     const DECK_EXT_HOT_PCO2: &str = concat!(
         "50434f3200000014000000740000000100020000",
         "50435032000000100000003000000001010003e800000016ffffffff00000205",
-        "000000000000000000000000ff0017",
+        "00000000000000000000000000ff0017",
         "50435032000000100000003000000002020003e800001789000023480000000b",
         "00120000000800010000000000ff8c00",
     );
@@ -818,6 +833,38 @@ mod tests {
         lists.iter().map(RawEntry::values).collect()
     }
 
+    /// The mints carry the records' colour tails (the F67 shape): the hot
+    /// records' 48-byte entries end in the `(code, r, g, b)` bytes, the
+    /// memory record's shorter shape lands colourless at 44.
+    fn assert_mint_tails(spliced_ext: &[u8]) {
+        let parsed = AnlzFile::parse(spliced_ext).expect("the spliced .EXT parses");
+        let hot = parsed
+            .tags(FourCc::PCO2)
+            .filter(|tag| write::list_flavour(tag) == Some(CueListType::HOT))
+            .flat_map(|tag| write::parse_pco2_entries(tag.payload()))
+            .collect::<Vec<_>>();
+        assert_eq!(hot.len(), 2);
+        for entry in &hot {
+            assert_eq!(entry.bytes.len(), 48, "the mint grew the colour tail");
+            assert_eq!(
+                &entry.bytes[44..48],
+                &[0x00, 0xff, 0x00, 0x17],
+                "the record's colour tail rides the mint"
+            );
+        }
+        let memory = parsed
+            .tags(FourCc::PCO2)
+            .filter(|tag| write::list_flavour(tag) == Some(CueListType::MEMORY))
+            .flat_map(|tag| write::parse_pco2_entries(tag.payload()))
+            .collect::<Vec<_>>();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(
+            memory[0].bytes.len(),
+            44,
+            "the memory mint stays colourless"
+        );
+    }
+
     // -- the tests -----------------------------------------------------------
 
     #[test]
@@ -922,6 +969,7 @@ mod tests {
             vec![(0, 1, 3018, u32::MAX)],
             "the memory PCO2 carries the session's one cue"
         );
+        assert_mint_tails(&spliced_ext);
         // And the untouched tags rode through whole.
         assert_eq!(
             parsed.payload(FourCc::PQTZ).expect("the grid survives"),
