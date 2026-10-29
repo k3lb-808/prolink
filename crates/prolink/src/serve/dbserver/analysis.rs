@@ -301,39 +301,35 @@ pub(super) fn apply_extended_overlay(
         let ty = u8::try_from(record.cue_type()).unwrap_or(1);
         let time_ms = record.time_ms();
         let loop_ms = record.loop_ms();
-        match all.iter_mut().find(|entry| entry.0 == pad) {
-            Some(entry) => {
-                // The write's cue type rides along: a loop written over a
-                // point must land a loop, not a point wearing a loop end.
-                entry.1 = ty;
-                entry.2 = time_ms;
-                entry.3 = loop_ms;
-            }
-            None => {
-                // The record's colour tail is the deck's own assignment (its
-                // pad sequence, or the loop default) — the reply carries it
-                // verbatim, the same bytes the splice mints into the file.
-                let (cix, r, g, b) = record
-                    .color_tail()
-                    .map_or((0, 0, 0, 0), |tail| (tail[0], tail[1], tail[2], tail[3]));
-                all.push((pad, ty, time_ms, loop_ms, String::new(), 0, cix, r, g, b));
-            }
+        if let Some(entry) = all.iter_mut().find(|entry| entry.0 == pad) {
+            // The write's cue type rides along: a loop written over a
+            // point must land a loop, not a point wearing a loop end.
+            entry.1 = ty;
+            entry.2 = time_ms;
+            entry.3 = loop_ms;
+        } else {
+            // The record's colour tail is the deck's own assignment (its
+            // pad sequence, or the loop default) — the reply carries it
+            // verbatim, the same bytes the splice mints into the file.
+            let (cix, r, g, b) = record
+                .color_tail()
+                .map_or((0, 0, 0, 0), |tail| (tail[0], tail[1], tail[2], tail[3]));
+            all.push((pad, ty, time_ms, loop_ms, String::new(), 0, cix, r, g, b));
         }
     }
     for (position, record) in &overlay.memories {
         let ty = u8::try_from(record.cue_type()).unwrap_or(1);
         let loop_ms = record.loop_ms();
-        match all
+        if let Some(entry) = all
             .iter_mut()
             .find(|entry| entry.0 == 0 && entry.2 == *position)
         {
-            Some(entry) => {
-                entry.1 = ty;
-                entry.3 = loop_ms;
-            }
+            entry.1 = ty;
+            entry.3 = loop_ms;
+        } else {
             // The `0xff` row marks the deck's own fresh cue, so the builder
             // gives it the unset id rekordbox's list carries (F66).
-            None => all.push((0, ty, *position, loop_ms, String::new(), 0xff, 0, 0, 0, 0)),
+            all.push((0, ty, *position, loop_ms, String::new(), 0xff, 0, 0, 0, 0));
         }
     }
 }
