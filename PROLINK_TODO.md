@@ -63,8 +63,10 @@ python, no second project in the loop.
   cue A red `00 ff 00 17`, a loop orange `00 ff 8c 00` (the deck's pad
   defaults). `CueWriteRecord::color_tail` reads it (`None` on the memory
   record's shorter shape and on all-zero tails), and the splicer's fresh
-  mints grow to the deck's own 48-byte shape with the tail at 44 — patched
-  entries keep the base's bytes, as the deck itself does. cratify's ingest
+  mints grow to the deck's own 48-byte shape with the tail at 44 — and the
+  patch takes the record's colour too: a deck write over an existing entry
+  lands in the colour the deck just assigned (its pad sequence), an entry
+  whose record carries no colour keeps its own. cratify's ingest
   (its PCO2 parser now reads tails off short entries too) takes the colour
   into the DB and the re-export renders it verbatim: a colour the deck
   assigned survives the whole round trip. The served *reply* still uses the

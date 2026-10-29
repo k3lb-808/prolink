@@ -31,9 +31,13 @@ verified one.
   the declared length grown to 48 and the tail at 44 — the deck's own F67
   shape, byte for byte.
 - The splicer's `record_values` carry the tail; a fresh mint grows to the
-  coloured shape when the record has one. Patched entries keep the base's
-  bytes — the deck itself does (F67: only type, position and loop end are
-  patched in place).
+  coloured shape when the record has one. The patch takes the record's
+  colour too — a write over an existing entry lands in the colour the deck
+  just assigned, which is what stopped the deck's own sequence from
+  surviving a save→reload round trip on slots the file already carried
+  (the live test: the analyzer's marker colour kept riding while the DJ's
+  freshly assigned colour was dropped); a record without a colour tail
+  keeps the entry's own.
 
 ## Verification
 
