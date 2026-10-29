@@ -513,7 +513,7 @@ fn entry_for(
     grid: &[u8],
 ) -> Vec<u8> {
     if let Some(bytes) = base
-        && let Some(patched) = patched_entry(bytes, kind, cue_type, time, loop_time, grid)
+        && let Some(patched) = patched_entry(bytes, kind, cue_type, time, loop_time, grid, tail)
     {
         return patched;
     }
@@ -546,6 +546,12 @@ fn kept(entry: &RawEntry, source: FourCc, target: FourCc) -> Vec<u8> {
 /// Patch an entry's own bytes: type, position and loop end in place, and for
 /// an extended entry the loop's length in beats.
 ///
+/// The record's colour tail, when the record carries one, overwrites the
+/// entry's tail: the deck assigns a pad colour at cue creation and the
+/// record rides it, so a replaced entry lands in the colour the DJ just
+/// saw — an entry whose record has no colour (a memory record's shorter
+/// shape, an all-zero tail) keeps the colour it had.
+///
 /// `None` when the bytes are too short to carry the fields — the caller
 /// mints a fresh entry instead.
 fn patched_entry(
@@ -555,6 +561,7 @@ fn patched_entry(
     time: u32,
     loop_time: u32,
     grid: &[u8],
+    tail: Option<[u8; 4]>,
 ) -> Option<Vec<u8>> {
     let (at_type, at_time, at_loop, at_length) = match kind {
         f if f == FourCc::PCOB => (28, 32, 36, None),
@@ -565,14 +572,9 @@ fn patched_entry(
         return None;
     }
     let mut out = bytes.to_vec();
-    let mut write_word = |at: usize, word: &[u8]| -> Option<()> {
-        let slot = out.get_mut(at..at + word.len())?;
-        slot.copy_from_slice(word);
-        Some(())
-    };
-    write_word(at_type, &[cue_type])?;
-    write_word(at_time, &time.to_be_bytes())?;
-    write_word(at_loop, &loop_time.to_be_bytes())?;
+    put(&mut out, at_type, &[cue_type])?;
+    put(&mut out, at_time, &time.to_be_bytes())?;
+    put(&mut out, at_loop, &loop_time.to_be_bytes())?;
     // An extended entry carries the loop's length in beats; a point carries
     // none, and a loop without a grid to count from carries the unset pair.
     if let Some(at_length) = at_length {
@@ -583,10 +585,35 @@ fn patched_entry(
             Some(beats) => (beats, 1),
             None => (0, 0),
         };
-        write_word(at_length, &numerator.to_be_bytes())?;
-        write_word(at_length + 2, &denominator.to_be_bytes())?;
+        put(&mut out, at_length, &numerator.to_be_bytes())?;
+        put(&mut out, at_length + 2, &denominator.to_be_bytes())?;
+    }
+    // The colour tail sits at 44 past the comment, right where both the
+    // deck's own entries and rekordbox's keep it. An entry too short to
+    // hold one grows to the deck's own coloured shape (F67, 48 bytes at
+    // zero comment length).
+    if kind == FourCc::PCO2
+        && let Some(tail) = tail
+        && out.len() >= 44
+    {
+        let clen =
+            usize::try_from(u32::from_be_bytes(out.get(40..44)?.try_into().ok()?)).unwrap_or(0);
+        let at_tail = 44 + clen;
+        while out.len() < at_tail + 4 {
+            out.push(0);
+        }
+        put(&mut out, at_tail, &tail)?;
+        let grown = u32::try_from(out.len()).ok()?;
+        put(&mut out, 8, &grown.to_be_bytes())?;
     }
     Some(out)
+}
+
+/// Write `word` at `at`, or `None` when the buffer is too short.
+fn put(out: &mut [u8], at: usize, word: &[u8]) -> Option<()> {
+    let slot = out.get_mut(at..at + word.len())?;
+    slot.copy_from_slice(word);
+    Some(())
 }
 
 /// Write bytes over a file: a sibling temporary file, synced, renamed.
@@ -677,13 +704,15 @@ mod tests {
         CueWriteRecord::parse(&raw).expect("the set record")
     }
 
-    /// The set record as a loop: type 2, the loop's end at `0x10`, and the
-    /// slot the test's session holds it in.
+    /// The set record as a loop: type 2, the loop's end at `0x10`, the slot
+    /// the test's session holds it in, and the deck's own loop orange
+    /// (F67) — so the overlay matches the captured files.
     fn loop_write_record(slot: u16, time_ms: u32, loop_ms: u32) -> CueWriteRecord {
         let mut raw = cue_write_record(time_ms).raw().to_vec();
         raw[0x04..0x06].copy_from_slice(&slot.to_le_bytes());
         raw[0x06..0x08].copy_from_slice(&2u16.to_le_bytes());
         raw[0x10..0x14].copy_from_slice(&loop_ms.to_le_bytes());
+        raw[0x4e..0x52].copy_from_slice(&[0x00, 0xff, 0x8c, 0x00]);
         CueWriteRecord::parse(&raw).expect("the loop record")
     }
 
@@ -834,8 +863,9 @@ mod tests {
     }
 
     /// The mints carry the records' colour tails (the F67 shape): the hot
-    /// records' 48-byte entries end in the `(code, r, g, b)` bytes, the
-    /// memory record's shorter shape lands colourless at 44.
+    /// records' 48-byte entries end in the `(code, r, g, b)` bytes — A's
+    /// red, the loop's orange — and the memory record's shorter shape lands
+    /// colourless at 44.
     fn assert_mint_tails(spliced_ext: &[u8]) {
         let parsed = AnlzFile::parse(spliced_ext).expect("the spliced .EXT parses");
         let hot = parsed
@@ -844,14 +874,18 @@ mod tests {
             .flat_map(|tag| write::parse_pco2_entries(tag.payload()))
             .collect::<Vec<_>>();
         assert_eq!(hot.len(), 2);
-        for entry in &hot {
-            assert_eq!(entry.bytes.len(), 48, "the mint grew the colour tail");
-            assert_eq!(
-                &entry.bytes[44..48],
-                &[0x00, 0xff, 0x00, 0x17],
-                "the record's colour tail rides the mint"
-            );
-        }
+        assert_eq!(hot[0].bytes.len(), 48, "the mint grew the colour tail");
+        assert_eq!(
+            &hot[0].bytes[44..48],
+            &[0x00, 0xff, 0x00, 0x17],
+            "the record's colour tail rides the mint"
+        );
+        assert_eq!(hot[1].bytes.len(), 48);
+        assert_eq!(
+            &hot[1].bytes[44..48],
+            &[0x00, 0xff, 0x8c, 0x00],
+            "the loop orange"
+        );
         let memory = parsed
             .tags(FourCc::PCO2)
             .filter(|tag| write::list_flavour(tag) == Some(CueListType::MEMORY))
@@ -1061,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_entry_keeps_its_comment_and_its_colour() {
+    fn a_replaced_entry_keeps_its_comment_and_takes_the_records_colour() {
         // A rekordbox-written hot cue: comment, colour tail, grown shape.
         let mut comment: Vec<u8> = "intro".encode_utf16().flat_map(u16::to_be_bytes).collect();
         comment.extend_from_slice(&[0, 0]);
@@ -1090,8 +1124,29 @@ mod tests {
         let base = container(&[path_tag("/Contents/track.mp3"), list]);
         let dir = scratch("preserve");
         let ext_path = write_scratch(&dir, "ANLZ0000.EXT", &base);
-        // The deck re-asserts the slot at a new position: the comment and
-        // the colour tail must survive, the position must move.
+        // A record whose tail region is all zero carries no colour: the
+        // entry keeps its own (the 0x2a marker), position aside.
+        let mut bare = cue_write_record(2200).raw().to_vec();
+        bare[0x4e..0x52].fill(0);
+        let overlay = TrackOverlay {
+            upserts: [(1, CueWriteRecord::parse(&bare).expect("the bare record"))].into(),
+            ..TrackOverlay::default()
+        };
+        assert!(splice_file(&ext_path, &overlay, File::Ext));
+        let spliced = std::fs::read(&ext_path).expect("the re-spliced .EXT");
+        let parsed = AnlzFile::parse(&spliced).expect("the re-spliced .EXT parses");
+        let entries =
+            write::parse_pco2_entries(parsed.tag(FourCc::PCO2).expect("the tag").payload());
+        assert_eq!(entries[0].time, 2200);
+        assert_eq!(
+            entries[0].bytes.get(44 + comment.len()..48 + comment.len()),
+            Some(&[0x2a, 0xff, 0x00, 0x00][..]),
+            "a colourless record leaves the entry's colour"
+        );
+        // The deck re-asserts the slot at a new position, its record
+        // carrying hot cue A's own red: the comment survives, the colour
+        // becomes the record's (the deck assigns at creation), the position
+        // moves.
         let overlay = TrackOverlay {
             upserts: [(1, cue_write_record(2110))].into(),
             ..TrackOverlay::default()
@@ -1105,9 +1160,14 @@ mod tests {
         let out = &entries[0];
         assert_eq!((out.hot_cue, out.cue_type, out.time), (1, 1, 2110));
         assert_eq!(
+            out.bytes.get(44..44 + comment.len()),
+            Some(comment.as_slice()),
+            "the comment rode through the patch"
+        );
+        assert_eq!(
             out.bytes.get(44 + comment.len()..48 + comment.len()),
-            Some(&[0x2a, 0xff, 0x00, 0x00][..]),
-            "the colour tail rode through the patch"
+            Some(&[0x00, 0xff, 0x00, 0x17][..]),
+            "the record's colour replaced the entry's"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
