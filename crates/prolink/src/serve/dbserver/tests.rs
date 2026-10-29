@@ -2895,7 +2895,10 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
     assert_eq!(extended[0].4, "intro");
     assert_eq!(extended[0].5, 0, "the memory row the base never carried");
     assert_eq!((extended[0].6, extended[0].7), (0x2a, 0xff));
-    // A brand-new hot cue lands with its position and no colour of ours.
+    // A brand-new hot cue lands with its position and the record's own
+    // colour: the deck assigns a pad colour at creation and the record
+    // rides it (az-loop: the slot's red) — the same bytes the splice mints
+    // into the file, so a re-fetch draws what the pad showed.
     let mut overlay = TrackOverlay::default();
     overlay.upserts.insert(5, cue_write_record(60000));
     apply_extended_overlay(&mut extended, &overlay);
@@ -2903,7 +2906,8 @@ fn the_deck_written_cues_overlay_the_analysis_records() {
     assert_eq!((fresh.0, fresh.2), (5, 60000));
     assert_eq!(
         (fresh.5, fresh.6, fresh.7, fresh.8, fresh.9),
-        (0, 0, 0, 0, 0)
+        (0, 0, 255, 0, 23),
+        "the record's colour assignment rides the reply"
     );
     // The same overlay on the memory-point list.
     let mut memory = vec![prolink_proto::analysis::Cue {

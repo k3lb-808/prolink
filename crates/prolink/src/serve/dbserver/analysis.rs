@@ -310,10 +310,13 @@ pub(super) fn apply_extended_overlay(
                 entry.3 = loop_ms;
             }
             None => {
-                // The write record's own colour tail is the one part of it
-                // nobody has decoded; a brand-new cue lands uncoloured until
-                // that read is settled (F65).
-                all.push((pad, ty, time_ms, loop_ms, String::new(), 0, 0, 0, 0, 0));
+                // The record's colour tail is the deck's own assignment (its
+                // pad sequence, or the loop default) — the reply carries it
+                // verbatim, the same bytes the splice mints into the file.
+                let (cix, r, g, b) = record
+                    .color_tail()
+                    .map_or((0, 0, 0, 0), |tail| (tail[0], tail[1], tail[2], tail[3]));
+                all.push((pad, ty, time_ms, loop_ms, String::new(), 0, cix, r, g, b));
             }
         }
     }
@@ -485,20 +488,15 @@ pub(super) fn cue_points_ext(
         // black (F66). Hot cues keep the ground-truth palette cycle when
         // the medium records none.
         if hot_cue != 0 {
-            // A loop's pad is orange, always — rekordbox serves its loops
-            // `[0x24][255][140][0]` (F66) and the deck draws them so; our
-            // section/palette colours on a loop read as a plain cue, which
-            // is exactly how today's loops hid in plain sight.
-            let colour = if ty == 2 {
+            // The stored colour rides verbatim — an assigned colour wins
+            // (rekordbox serves phrase-markered hot loops, and the deck's
+            // own assignments carry code 0), uncoloured stays colourless as
+            // rekordbox's own records are. Only a colourless loop fills the
+            // default: rekordbox's assignment for a loop is the orange pad
+            // `0x24 ff 8c 00` (F66), the deck's own loops carry the same
+            // RGB with code 0 (az-loop).
+            let colour = if ty == 2 && cix == 0 && r == 0 && g == 0 && b == 0 {
                 [0x24, 0xff, 0x8c, 0x00]
-            } else if r == 0 && g == 0 && b == 0 && cix == 0 {
-                let palette: [[u8; 4]; 4] = [
-                    [0x2a, 0xff, 0x00, 0x00],
-                    [0x38, 0xb3, 0x00, 0xff],
-                    [0x16, 0x1a, 0xff, 0x00],
-                    [0x09, 0x00, 0xe0, 0xff],
-                ];
-                palette[(hot_cue as usize) % 4]
             } else {
                 [cix, r, g, b]
             };
