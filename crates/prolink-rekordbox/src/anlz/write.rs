@@ -9,8 +9,8 @@
 //! colour. Both carry the same four numbers: the hot-cue number, the type,
 //! the position and the loop end.
 //!
-//! Rendering a container back ([`AnlzFile::render_with`]) keeps every tag the
-//! caller does not name byte for byte — waveforms, grids, paths — and
+//! Rendering a container back keeps every tag the caller does not name byte
+//! for byte — waveforms, grids, paths — and
 //! recomputes only the two declared lengths a change touches: the replaced
 //! tag's own and the container's.
 

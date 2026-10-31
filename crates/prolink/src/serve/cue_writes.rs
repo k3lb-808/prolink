@@ -7,8 +7,7 @@
 //! state about every 15 s while the track stays loaded — the writes are
 //! idempotent, so a repeat costs nothing. The replies overlay the writes
 //! onto the analysis records at reply time ([`crate::serve::dbserver`]), and
-//! the splice ([`crate::serve::splice`]) lands the same state into the
-//! served tree's own ANLZ files.
+//! the splice lands the same state into the served tree's own ANLZ files.
 //!
 //! The overlay is deliberately **memory only**. The spliced files are the
 //! persistence: once a track's splice has run, its cue state is in the
