@@ -1,8 +1,6 @@
 # prolink
 
-[![CI](https://github.com/usr-ein/prolink/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/usr-ein/prolink/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/prolink.svg?logo=rust)](https://crates.io/crates/prolink)
-[![docs.rs](https://img.shields.io/docsrs/prolink?logo=docsdotrs&label=docs.rs)](https://docs.rs/prolink)
+[![CI](https://github.com/k3lb-808/prolink/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/k3lb-808/prolink/actions/workflows/ci.yml)
 [![MSRV 1.97](https://img.shields.io/badge/MSRV-1.97-blue.svg?logo=rust)](Cargo.toml)
 [![licence GPL-3.0-only](https://img.shields.io/badge/licence-GPL--3.0--only-blue.svg)](LICENSE)
 
@@ -14,18 +12,55 @@ A Pioneer **Pro DJ Link** implementation in Rust, both directions:
    players browse and play a local rekordbox medium, or a stick of plain
    music files by its folders, as a CDJ offers one.
 
+## What this fork adds
+
+This is a fork of [usr-ein/prolink](https://github.com/usr-ein/prolink) that
+follows upstream's main: everything upstream does, this carries, unchanged.
+On top of it:
+
+1. **A new device generation.** The AZ generation — the OneLibrary units,
+   the XDJ-AZ among them, whose library sources a player asks through a
+   portmapper on **50111** rather than 111. Discovery is generation-aware,
+   the NFS server registers on both portmapper generations at once (so one
+   serve speaks to a CDJ-2000NXS and an AZ on the same link), the
+   source-status body a booting AZ needs before it will ask for a port at
+   all is sent, the AZ's source-monitor reports are decoded, and a
+   two-player unit such as the AZ is served on both of its players. The
+   fork's serving path has met a real XDJ-AZ: it browses, loads and plays
+   from this server.
+2. **Cues written back.** The writes a deck sends a source are decoded
+   (`0x2705`): hot cues, beat loops and memory cues set and cleared on the
+   deck end up on the served media. The answers carry what a deck's own
+   stick write carries — a loop's length in beats, a cue's pad colour —
+   so the deck draws back what it set, and every write lands in the served
+   medium's own `ANLZ` files, the way the deck's own firmware records an
+   edit: no sidecar, no re-export, the cue state survives the stick's next
+   mount and any other player reads it.
+
+The finding-by-finding provenance for both is [`work_log/038`](work_log/038-waveform-colour.md)
+through [`work_log/046`](work_log/046-the-colour-tail.md), each entry
+carrying the capture or hardware session that justified it.
+
 It is written from captures of real hardware: two CDJ-2000NXS on firmware 1.44,
-37 pcapng sessions, and a working Python proof of concept and C++ port that
-preceded it. Where the published reverse-engineering literature disagrees with
-what the hardware does, the hardware wins and the doc comment says so.
+37 pcapng sessions, a working Python proof of concept and C++ port that
+preceded it — joined, in this fork, by the sessions with a real XDJ-AZ that
+the additions above were worked out from. Where the published
+reverse-engineering literature disagrees with what the hardware does, the
+hardware wins and the doc comment says so.
 
 > **Status: working against real hardware.** Two CDJ-2000NXS browse this
 > server's media, load and play from it, search it, sort it, tag from it and
-> read its analysis, and 805 tests pass — including a corpus replay of 37
+> read its analysis, and 843 tests pass — including a corpus replay of 37
 > captures of real CDJ traffic and an end-to-end test of this library's servers
 > against its own clients. Several bugs that only hardware could find have been
 > fixed, each recorded in [`work_log/`](work_log/README.md) with the capture
 > that proved it.
+>
+> The additions of this fork have met their hardware as well: a real XDJ-AZ
+> browses, loads and plays from this server on both of its players, and cue
+> writes set on the deck — hot cues, beat loops, memory cues, colours — land
+> in the served medium's own `ANLZ` files, the way the deck's own firmware
+> records an edit made on the stick directly.
 >
 > One known gap: the **key-matching indicator** does not light on a deck
 > browsing this server, and every field we send has been byte-compared against
@@ -200,7 +235,7 @@ the wrong call:
 ## Testing
 
 ```sh
-cargo test --workspace                                   # 805 tests, no hardware needed
+cargo test --workspace                                   # 843 tests, no hardware needed
 PROLINK_CAPTURES=/other/captures cargo test --workspace   # ...against a different corpus
 ```
 
