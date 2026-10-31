@@ -11,8 +11,8 @@ edition = "2024"
 # whatever its own manifest says (it seeks an `io::Take`).
 rust-version = "1.97"
 license = "GPL-3.0-only"
-repository = "https://github.com/usr-ein/prolink"
-homepage = "https://github.com/usr-ein/prolink"
+repository = "https://github.com/k3lb-808/prolink"
+homepage = "https://github.com/k3lb-808/prolink"
 # `documentation` is deliberately not inherited: it differs per crate, and one
 # workspace-wide value would point every crate's crates.io page at the same
 # docs.rs URL. Each manifest names its own.
